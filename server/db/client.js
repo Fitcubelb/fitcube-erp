@@ -21,6 +21,18 @@ async function init() {
   for (const stmt of statements) {
     await db.execute(stmt);
   }
+  // Migrations for columns added after a database already existed (both
+  // Anthony's local file and the live Turso DB). ALTER TABLE ... ADD COLUMN
+  // isn't idempotent in SQLite, so we just try each one and swallow the
+  // "duplicate column" error when it's already there.
+  const migrations = ["ALTER TABLE clients ADD COLUMN music_link TEXT"];
+  for (const m of migrations) {
+    try {
+      await db.execute(m);
+    } catch (err) {
+      if (!/duplicate column/i.test(err.message)) throw err;
+    }
+  }
 }
 
 module.exports = { db, init };

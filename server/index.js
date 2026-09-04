@@ -77,31 +77,55 @@ app.get('/api/clients/:id', async (req, res) => {
       args: [req.params.id],
     })
   ).rows;
-  ok(res, { ...client, sessions, appointments });
+  const photos = (
+    await db.execute({
+      sql: `SELECT * FROM client_photos WHERE client_id=? ORDER BY taken_at DESC, created_at DESC`,
+      args: [req.params.id],
+    })
+  ).rows;
+  ok(res, { ...client, sessions, appointments, photos });
 });
 
 app.post('/api/clients', async (req, res) => {
-  const { name, phone, notes } = req.body || {};
+  const { name, phone, notes, music_link } = req.body || {};
   if (!name || !name.trim()) return bad(res, 'name is required');
   const r = await db.execute({
-    sql: 'INSERT INTO clients (name, phone, notes) VALUES (?, ?, ?)',
-    args: [name.trim(), phone || null, notes || null],
+    sql: 'INSERT INTO clients (name, phone, notes, music_link) VALUES (?, ?, ?, ?)',
+    args: [name.trim(), phone || null, notes || null, music_link || null],
   });
   ok(res, { id: Number(r.lastInsertRowid) });
 });
 
 app.put('/api/clients/:id', async (req, res) => {
-  const { name, phone, notes, archived } = req.body || {};
+  const { name, phone, notes, archived, music_link } = req.body || {};
   await db.execute({
     sql: `UPDATE clients SET
             name = COALESCE(?, name),
             phone = COALESCE(?, phone),
             notes = COALESCE(?, notes),
+            music_link = COALESCE(?, music_link),
             archived = COALESCE(?, archived),
             updated_at = datetime('now')
           WHERE id=?`,
-    args: [name ?? null, phone ?? null, notes ?? null, archived === undefined ? null : archived ? 1 : 0, req.params.id],
+    args: [name ?? null, phone ?? null, notes ?? null, music_link ?? null, archived === undefined ? null : archived ? 1 : 0, req.params.id],
   });
+  ok(res, { ok: true });
+});
+
+// ---------- Progress photos ----------
+
+app.post('/api/clients/:id/photos', async (req, res) => {
+  const { image_data, caption, taken_at } = req.body || {};
+  if (!image_data) return bad(res, 'image_data is required');
+  const r = await db.execute({
+    sql: `INSERT INTO client_photos (client_id, image_data, caption, taken_at) VALUES (?, ?, ?, COALESCE(?, datetime('now')))`,
+    args: [req.params.id, image_data, caption || null, taken_at || null],
+  });
+  ok(res, { id: Number(r.lastInsertRowid) });
+});
+
+app.delete('/api/photos/:id', async (req, res) => {
+  await db.execute({ sql: 'DELETE FROM client_photos WHERE id=?', args: [req.params.id] });
   ok(res, { ok: true });
 });
 
@@ -429,8 +453,8 @@ app.get('/api/reports/revenue', async (req, res) => {
 // filesystem, hosting free tier, even Turso) is a "should be fine" — this is
 // a "definitely fine" that lives wherever Anthony puts the downloaded file.
 
-const BACKUP_TABLES = ['clients', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
-const BACKUP_INSERT_ORDER = ['clients', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+const BACKUP_TABLES = ['clients', 'client_photos', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+const BACKUP_INSERT_ORDER = ['clients', 'client_photos', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
 const BACKUP_DELETE_ORDER = [...BACKUP_INSERT_ORDER].reverse(); // children before parents
 
 app.get('/api/backup/export', async (req, res) => {

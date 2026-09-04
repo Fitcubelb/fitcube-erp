@@ -6,9 +6,22 @@ CREATE TABLE IF NOT EXISTS clients (
   name TEXT NOT NULL,
   phone TEXT,
   notes TEXT,
+  music_link TEXT,                   -- pasted Spotify/Anghami/SoundCloud/YouTube playlist link
   archived INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Progress photos pasted/uploaded per client. Images are resized and
+-- JPEG-compressed in the browser before upload (see app.js
+-- compressImageFile), so this stays light even on the free DB tier.
+CREATE TABLE IF NOT EXISTS client_photos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  image_data TEXT NOT NULL,          -- base64 data URL
+  caption TEXT,
+  taken_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS services (
@@ -97,3 +110,4 @@ CREATE TABLE IF NOT EXISTS purchase_items (
 CREATE INDEX IF NOT EXISTS idx_session_entries_client ON session_entries(client_id);
 CREATE INDEX IF NOT EXISTS idx_appointments_client ON appointments(client_id);
 CREATE INDEX IF NOT EXISTS idx_appointments_starts_at ON appointments(starts_at);
+CREATE INDEX IF NOT EXISTS idx_client_photos_client ON client_photos(client_id);

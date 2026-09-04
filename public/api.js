@@ -92,6 +92,14 @@ const api = {
     }
   },
 
+  async addClientPhoto(clientId, payload) {
+    return mutate('POST', `/api/clients/${clientId}/photos`, payload);
+  },
+
+  async deletePhoto(photoId) {
+    return mutate('DELETE', `/api/photos/${photoId}`, undefined);
+  },
+
   async createService(payload) {
     const result = await mutate('POST', '/api/services', payload);
     const id = result.offline ? `tmp_${Date.now()}` : result.data.id;

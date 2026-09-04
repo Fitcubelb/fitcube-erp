@@ -321,6 +321,8 @@ function openAddClientModal() {
     <label>Name</label><input id="f-name" placeholder="Full name" autocomplete="name" />
     <label>Phone</label><input id="f-phone" placeholder="70 123 456" autocomplete="tel" type="tel" />
     <label>Notes</label><textarea id="f-notes" placeholder="Optional"></textarea>
+    <label>Preferred music (optional)</label>
+    <input id="f-music" placeholder="Paste a Spotify / Anghami / SoundCloud / YouTube link" autocomplete="off" />
     ${!CONTACT_PICKER_SUPPORTED ? `<div class="sub" style="margin-top:8px">Tip: tap into Name or Phone — your phone may suggest matching contacts as you type.</div>` : ''}
     <div class="btn-row"><button class="btn block" id="f-save">Save client</button></div>
   `);
@@ -343,7 +345,8 @@ function openAddClientModal() {
     if (!name) return;
     const phone = document.getElementById('f-phone').value.trim();
     const notes = document.getElementById('f-notes').value.trim();
-    await api.createClient({ name, phone: phone || null, notes: notes || null });
+    const musicLink = document.getElementById('f-music').value.trim();
+    await api.createClient({ name, phone: phone || null, notes: notes || null, music_link: musicLink || null });
     closeModal();
     renderClientsList();
   });
@@ -355,6 +358,7 @@ async function renderClientDetail(id) {
   if (!c) { viewEl.innerHTML = `<div class="empty">Client not found (and not cached offline).</div>`; return; }
   const sessions = c.sessions || [];
   const appts = c.appointments || [];
+  const photos = c.photos || [];
   const unpaidTotal = sessions.filter((s) => s.payment_state === 'unpaid').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
   const unpaidNoAmt = sessions.filter((s) => s.payment_state === 'unpaid' && s.amount === null).length;
   const credits = sessions.filter((s) => s.payment_state === 'prepaid' && s.amount === null).length;
@@ -369,6 +373,7 @@ async function renderClientDetail(id) {
       <div class="btn-row">
         <button class="btn secondary" id="edit-client-btn">Edit contact info</button>
         ${c.phone ? `<button class="btn secondary" id="whatsapp-btn">WhatsApp</button>` : ''}
+        ${c.music_link ? `<button class="btn secondary" id="music-btn">${musicPlatformInfo(c.music_link).icon} Play on ${musicPlatformInfo(c.music_link).label}</button>` : ''}
       </div>
     </div>
 
@@ -381,6 +386,13 @@ async function renderClientDetail(id) {
       <button class="btn block" id="log-session-btn">Log session</button>
       <button class="btn secondary block" id="add-appt-btn">Schedule</button>
     </div>
+
+    <h2>Progress photos</h2>
+    <div class="photo-strip" id="photo-strip">
+      ${photos.map((p) => `<div class="photo-thumb" data-id="${p.id}"><img src="${p.image_data}" loading="lazy" /></div>`).join('')}
+      <button class="photo-add-btn" id="add-photo-btn" title="Add progress photo">+</button>
+    </div>
+    ${!photos.length ? '<div class="empty">No progress photos yet — tap + to add one.</div>' : ''}
 
     <h2>Session history</h2>
     <div class="card">
@@ -402,6 +414,15 @@ async function renderClientDetail(id) {
   document.getElementById('add-appt-btn').addEventListener('click', () => openAddAppointmentModal(c.id));
   const waBtn = document.getElementById('whatsapp-btn');
   if (waBtn) waBtn.addEventListener('click', () => sendWhatsAppReminder(c, `Hi ${c.name}, this is Fit Cube.`));
+  const musicBtn = document.getElementById('music-btn');
+  if (musicBtn) musicBtn.addEventListener('click', () => window.open(c.music_link, '_blank'));
+  document.getElementById('add-photo-btn').addEventListener('click', () => openAddPhotoModal(c.id));
+  document.querySelectorAll('#photo-strip .photo-thumb').forEach((thumb) => {
+    thumb.addEventListener('click', () => {
+      const p = photos.find((x) => String(x.id) === thumb.dataset.id);
+      if (p) openPhotoLightbox(p, c.id);
+    });
+  });
   viewEl.querySelectorAll('[data-remind]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const msg = `Hi ${c.name}, reminder from Fit Cube: your ${btn.dataset.service} session is on ${fmtDate(btn.dataset.when)}. See you then!`;
@@ -453,6 +474,8 @@ function openEditClientModal(c) {
     <label>Name</label><input id="f-name" value="${esc(c.name)}" />
     <label>Phone</label><input id="f-phone" value="${esc(c.phone || '')}" />
     <label>Notes</label><textarea id="f-notes">${esc(c.notes || '')}</textarea>
+    <label>Preferred music</label>
+    <input id="f-music" value="${esc(c.music_link || '')}" placeholder="Paste a Spotify / Anghami / SoundCloud / YouTube link" autocomplete="off" />
     <div class="btn-row">
       <button class="btn block" id="f-save">Save</button>
       <button class="btn danger" id="f-archive">Archive client</button>
@@ -463,6 +486,7 @@ function openEditClientModal(c) {
       name: document.getElementById('f-name').value.trim(),
       phone: document.getElementById('f-phone').value.trim() || null,
       notes: document.getElementById('f-notes').value.trim() || null,
+      music_link: document.getElementById('f-music').value.trim() || null,
     });
     closeModal();
     renderClientDetail(c.id);
@@ -472,6 +496,101 @@ function openEditClientModal(c) {
     await api.updateClient(c.id, { archived: true });
     closeModal();
     location.hash = '#/clients';
+  });
+}
+
+// ---------- music link ----------
+
+function musicPlatformInfo(url) {
+  const u = (url || '').toLowerCase();
+  if (u.includes('spotify')) return { label: 'Spotify', icon: '🎧' };
+  if (u.includes('anghami')) return { label: 'Anghami', icon: '🎵' };
+  if (u.includes('soundcloud')) return { label: 'SoundCloud', icon: '☁️' };
+  if (u.includes('youtube') || u.includes('youtu.be')) return { label: 'YouTube', icon: '▶️' };
+  return { label: 'Music', icon: '🎵' };
+}
+
+// ---------- progress photos ----------
+
+// Resizes + JPEG-compresses a picked photo in the browser before it's ever
+// sent anywhere, so a full-resolution phone photo (several MB) becomes a
+// couple hundred KB — keeps the app fast and keeps the free database tier
+// from filling up.
+function compressImageFile(file, maxDim = 1280, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    if (!file.type || !file.type.startsWith('image/')) { reject(new Error('That file is not an image.')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read that file.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Could not open that image.'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+          else { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function openAddPhotoModal(clientId) {
+  openModal(`
+    <h3>Add progress photo</h3>
+    <label>Photo</label>
+    <input id="f-photo-file" type="file" accept="image/*" capture="environment" />
+    <div id="f-photo-preview" style="margin-top:10px"></div>
+    <label>Caption</label><input id="f-photo-caption" placeholder="Optional — e.g. Week 4" />
+    <div class="btn-row"><button class="btn block" id="f-save" disabled>Save photo</button></div>
+  `);
+  let dataUrl = null;
+  const fileInput = document.getElementById('f-photo-file');
+  const preview = document.getElementById('f-photo-preview');
+  const saveBtn = document.getElementById('f-save');
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    saveBtn.disabled = true;
+    preview.innerHTML = `<div class="sub">Preparing photo…</div>`;
+    try {
+      dataUrl = await compressImageFile(file);
+      preview.innerHTML = `<img src="${dataUrl}" style="max-width:100%;border-radius:10px;display:block" />`;
+      saveBtn.disabled = false;
+    } catch (err) {
+      dataUrl = null;
+      preview.innerHTML = `<div class="sub" style="color:var(--danger)">${esc(err.message)}</div>`;
+    }
+  });
+  saveBtn.addEventListener('click', async () => {
+    if (!dataUrl) return;
+    await api.addClientPhoto(clientId, {
+      image_data: dataUrl,
+      caption: document.getElementById('f-photo-caption').value.trim() || null,
+    });
+    closeModal();
+    renderClientDetail(clientId);
+  });
+}
+
+function openPhotoLightbox(photo, clientId) {
+  openModal(`
+    <img src="${photo.image_data}" style="max-width:100%;border-radius:10px;display:block" />
+    ${photo.caption ? `<div class="sub" style="margin-top:8px">${esc(photo.caption)}</div>` : ''}
+    <div class="sub" style="margin-top:4px">${fmtDate(photo.taken_at || photo.created_at)}</div>
+    <div class="btn-row"><button class="btn danger block" id="f-delete-photo">Delete photo</button></div>
+  `);
+  document.getElementById('f-delete-photo').addEventListener('click', async () => {
+    if (!confirm('Delete this photo? This cannot be undone.')) return;
+    await api.deletePhoto(photo.id);
+    closeModal();
+    renderClientDetail(clientId);
   });
 }
 

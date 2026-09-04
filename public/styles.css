@@ -180,6 +180,15 @@ textarea { resize: vertical; min-height: 60px; }
 .close-x { position: absolute; top: 14px; right: 16px; background: none; border: none; color: var(--text-dim); font-size: 1.3rem; cursor: pointer; }
 .modal-wrap { position: relative; }
 
+.photo-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+.photo-thumb { flex: 0 0 auto; width: 84px; height: 84px; border-radius: 10px; overflow: hidden; cursor: pointer; border: 1px solid var(--border); }
+.photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-add-btn {
+  flex: 0 0 auto; width: 84px; height: 84px; border-radius: 10px;
+  border: 1px dashed var(--border); background: var(--surface-2); color: var(--text-dim);
+  font-size: 1.6rem; display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+
 .combo-wrap { position: relative; }
 .combo-suggestions {
   position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 5;
