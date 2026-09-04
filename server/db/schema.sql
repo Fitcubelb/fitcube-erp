@@ -51,7 +51,11 @@ CREATE TABLE IF NOT EXISTS session_entries (
   -- Set when a prepaid credit row (payment_state='prepaid', amount NULL) is
   -- redeemed for an actual visit — see POST /api/clients/:id/redeem-credit.
   -- NULL means the credit is still available to use.
-  redeemed_at TEXT
+  redeemed_at TEXT,
+  -- Assigned only to rows that represent an actual checkin (a paid/unpaid
+  -- entry, or a redeemed credit) — see nextReceiptNumber() in server/index.js.
+  -- NULL on unredeemed credit-grant rows and on older, pre-existing rows.
+  receipt_number INTEGER
 );
 
 -- Simple scheduled appointments (separate from the session log above, which

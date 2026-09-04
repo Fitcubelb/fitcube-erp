@@ -104,6 +104,36 @@ h2 { font-size: 1rem; margin: 18px 0 8px; color: var(--text-dim); font-weight: 6
 }
 .search::placeholder { color: var(--text-dim); }
 
+/* Checkins tab: a colored, tappable summary card per Day/Month/Year group... */
+.checkin-group-card {
+  background: var(--accent); color: #ffffff;
+  border-radius: var(--radius); padding: 14px; margin-bottom: 10px; cursor: pointer;
+}
+.checkin-group-label { font-weight: 700; font-size: 0.95rem; margin-bottom: 10px; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.checkin-group-arrow { opacity: 0.85; }
+.checkin-group-stats { display: flex; justify-content: space-around; text-align: center; }
+.checkin-group-stat { font-size: 1.2rem; font-weight: 700; }
+.checkin-group-stat-label { font-size: 0.72rem; opacity: 0.85; margin-top: 2px; }
+
+/* ...and a flat entry ("Logs") card for one checkin: date block on the left,
+   name/badge/time on top, a small "By Fit Cube" line, receipt + amount below. */
+.checkin-row {
+  display: flex; gap: 12px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px;
+}
+.checkin-date-block { flex: 0 0 auto; width: 44px; text-align: center; }
+.checkin-day { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+.checkin-month { font-size: 0.75rem; color: var(--text-dim); margin-top: 2px; }
+.checkin-main { flex: 1; min-width: 0; }
+.checkin-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.checkin-name { font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.checkin-time { font-size: 0.75rem; color: var(--text-dim); text-align: right; white-space: nowrap; }
+.checkin-sub { font-size: 0.78rem; color: var(--text-dim); margin-top: 2px; }
+.checkin-bottom { display: flex; gap: 18px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.checkin-label { font-size: 0.68rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }
+.checkin-value { font-size: 0.88rem; font-weight: 600; margin-top: 1px; }
+
 .segmented {
   display: flex; gap: 6px; margin-bottom: 14px; overflow-x: auto;
   -ms-overflow-style: none; scrollbar-width: none;

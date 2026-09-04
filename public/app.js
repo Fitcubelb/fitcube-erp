@@ -213,6 +213,7 @@ async function render() {
   if (route === 'schedule') return renderSchedule();
   if (route === 'inventory') return renderInventory();
   if (route === 'sales') return renderSales();
+  if (route === 'checkins') return renderCheckins();
   if (route === 'settings') return renderSettings();
   return renderDashboard();
 }
@@ -523,7 +524,7 @@ async function restoreSnapshotConfirmed(id) {
   if (!confirm('This replaces ALL current data on the server with this automatic backup. This cannot be undone. Continue?')) return;
   try {
     const result = await api.restoreSnapshot(id);
-    for (const store of ['clients', 'services', 'products', 'appointments', 'meta', 'packages']) {
+    for (const store of ['clients', 'services', 'products', 'appointments', 'meta', 'packages', 'checkins']) {
       await idb.clear(store);
     }
     alert('Restore complete: ' + result.restored.map((r) => `${r.table} (${r.count})`).join(', '));
@@ -1880,6 +1881,229 @@ async function openPurchaseModal() {
   });
 }
 
+// ---------- checkins ----------
+// Every actual visit (a paid/unpaid session, or a redeemed prepaid credit)
+// across every client — a searchable, filterable log with a running Day /
+// Month / Year rollup, deliberately mirroring the layout of a checkins/sales
+// log Anthony already uses elsewhere: a search bar with a filter sheet
+// (Filter by date, Search by, Sort by), a totals row, and either a flat list
+// of entries ("Logs") or colored summary cards you tap into ("Day"/
+// "Month"/"Year").
+
+let _checkinsCache = [];
+let _checkinsFilterMode = 'logs'; // 'logs' | 'day' | 'month' | 'year'
+let _checkinsSearchBy = 'name';   // 'name' | 'receipt'
+let _checkinsSortBy = 'date';     // 'date' | 'sales' | 'name'
+let _checkinsDrillKey = null;     // set once you tap into a specific day/month/year card
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function checkinDate(c) {
+  const d = c.session_date || c.created_at;
+  if (!d) return null;
+  const dt = new Date(d.includes('T') || d.includes(' ') ? d.replace(' ', 'T') + (d.includes('Z') ? '' : 'Z') : d);
+  return isNaN(dt) ? null : dt;
+}
+function checkinDateParts(c) {
+  const dt = checkinDate(c);
+  if (!dt) return { day: '—', month: '', weekday: '', time: '' };
+  return {
+    day: String(dt.getDate()).padStart(2, '0'),
+    month: MONTH_ABBR[dt.getMonth()],
+    weekday: dt.toLocaleDateString(undefined, { weekday: 'long' }),
+    time: dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+  };
+}
+function checkinGroupKey(c, mode) {
+  const dt = checkinDate(c);
+  if (!dt) return 'unknown';
+  const y = dt.getFullYear(), m = String(dt.getMonth() + 1).padStart(2, '0'), d = String(dt.getDate()).padStart(2, '0');
+  if (mode === 'day') return `${y}-${m}-${d}`;
+  if (mode === 'month') return `${y}-${m}`;
+  return String(y);
+}
+function checkinGroupLabel(key, mode) {
+  if (key === 'unknown') return 'Unknown date';
+  if (mode === 'day') {
+    const [y, m, d] = key.split('-').map(Number);
+    return `${String(d).padStart(2, '0')} ${MONTH_ABBR[m - 1]} ${y}`;
+  }
+  if (mode === 'month') {
+    const [y, m] = key.split('-').map(Number);
+    return `${MONTH_ABBR[m - 1]} ${y}`;
+  }
+  return key;
+}
+
+async function renderCheckins() {
+  viewEl.innerHTML = `<h1>Checkins</h1><div class="empty">Loading…</div>`;
+  const { data, fromCache } = await api.listCheckins();
+  _checkinsCache = data || [];
+  _checkinsDrillKey = null;
+  paintCheckins(fromCache);
+}
+
+function paintCheckins(fromCache) {
+  const all = _checkinsCache;
+  const totalCheckins = all.length;
+  const totalSales = all.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+  const totalClients = new Set(all.map((c) => c.client_id)).size;
+
+  viewEl.innerHTML = `
+    <h1>Checkins</h1>
+    ${fromCache ? `<div class="sync-banner">Showing saved data — you're offline.</div>` : ''}
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+      <input class="search" id="checkins-search" placeholder="Find sales…" autocomplete="off" autocapitalize="off" spellcheck="false" style="flex:1;margin-bottom:0" />
+      <button class="btn secondary" id="checkins-filter-btn" style="padding:0 14px;align-self:stretch" title="Filter">⚙</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
+      <div class="card" style="text-align:center;padding:12px 6px"><div class="stat">${totalCheckins.toLocaleString()}</div><div class="stat-label">Checkins</div></div>
+      <div class="card" style="text-align:center;padding:12px 6px"><div class="stat">${money(totalSales)}</div><div class="stat-label">Sales</div></div>
+      <div class="card" style="text-align:center;padding:12px 6px"><div class="stat">${totalClients.toLocaleString()}</div><div class="stat-label">Clients</div></div>
+    </div>
+    <div id="checkins-body"></div>
+  `;
+  document.getElementById('checkins-filter-btn').addEventListener('click', openCheckinsFilterModal);
+  document.getElementById('checkins-search').addEventListener('input', (e) => paintCheckinsBody(e.target.value.trim().toLowerCase()));
+  paintCheckinsBody('');
+}
+
+function sortCheckins(list, sortBy) {
+  const arr = [...list];
+  if (sortBy === 'sales') arr.sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0));
+  else if (sortBy === 'name') arr.sort((a, b) => (a.client_name || '').localeCompare(b.client_name || ''));
+  else arr.sort((a, b) => (checkinDate(b) || 0) - (checkinDate(a) || 0));
+  return arr;
+}
+
+function groupCheckins(list, mode) {
+  const map = new Map();
+  for (const c of list) {
+    const key = checkinGroupKey(c, mode);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(c);
+  }
+  return [...map.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([key, items]) => ({
+      key,
+      label: checkinGroupLabel(key, mode),
+      checkins: items.length,
+      sales: items.reduce((sum, c) => sum + (Number(c.amount) || 0), 0),
+      clients: new Set(items.map((c) => c.client_id)).size,
+    }));
+}
+
+function paintCheckinsBody(query) {
+  const body = document.getElementById('checkins-body');
+  let list = _checkinsCache;
+  if (query) {
+    list = list.filter((c) => _checkinsSearchBy === 'receipt'
+      ? String(c.receipt_number || '').includes(query)
+      : (c.client_name || '').toLowerCase().includes(query));
+  }
+  if (_checkinsDrillKey) {
+    list = list.filter((c) => checkinGroupKey(c, _checkinsFilterMode) === _checkinsDrillKey);
+  }
+  list = sortCheckins(list, _checkinsSortBy);
+
+  if (_checkinsDrillKey) {
+    body.innerHTML = `
+      <div class="btn-row" style="margin-bottom:6px"><button class="btn secondary" id="checkins-back-btn">← Back</button></div>
+      <div class="sub" style="margin-bottom:8px;font-weight:600">${esc(checkinGroupLabel(_checkinsDrillKey, _checkinsFilterMode))}</div>
+      ${list.length ? list.map(checkinRowHtml).join('') : '<div class="empty">No checkins found.</div>'}
+    `;
+    document.getElementById('checkins-back-btn').addEventListener('click', () => { _checkinsDrillKey = null; paintCheckinsBody(query); });
+  } else if (_checkinsFilterMode === 'logs') {
+    body.innerHTML = list.length ? list.map(checkinRowHtml).join('') : '<div class="empty">No checkins found.</div>';
+  } else {
+    const groups = groupCheckins(list, _checkinsFilterMode);
+    body.innerHTML = groups.length ? groups.map(checkinGroupCardHtml).join('') : '<div class="empty">No checkins found.</div>';
+    body.querySelectorAll('[data-drill]').forEach((el) => {
+      el.addEventListener('click', () => { _checkinsDrillKey = el.dataset.drill; paintCheckinsBody(query); });
+    });
+  }
+}
+
+function checkinGroupCardHtml(g) {
+  return `
+    <div class="checkin-group-card" data-drill="${esc(g.key)}">
+      <div class="checkin-group-label">${esc(g.label)} <span class="checkin-group-arrow">⌄</span></div>
+      <div class="checkin-group-stats">
+        <div><div class="checkin-group-stat">${g.checkins}</div><div class="checkin-group-stat-label">Checkins</div></div>
+        <div><div class="checkin-group-stat">${money(g.sales)}</div><div class="checkin-group-stat-label">Sales</div></div>
+        <div><div class="checkin-group-stat">${g.clients}</div><div class="checkin-group-stat-label">Clients</div></div>
+      </div>
+    </div>`;
+}
+
+function checkinRowHtml(c) {
+  const d = checkinDateParts(c);
+  const badge = c.payment_state === 'unpaid'
+    ? `<span class="badge unpaid">unpaid</span>`
+    : c.payment_state === 'prepaid'
+      ? `<span class="badge credit">used a credit</span>`
+      : `<span class="badge neutral">paid</span>`;
+  return `
+    <div class="checkin-row">
+      <div class="checkin-date-block">
+        <div class="checkin-day">${d.day}</div>
+        <div class="checkin-month">${d.month}</div>
+      </div>
+      <div class="checkin-main">
+        <div class="checkin-top">
+          <div class="checkin-name">${esc(c.client_name)} ${badge}</div>
+          <div class="checkin-time">${esc(d.weekday)}<br>${esc(d.time)}</div>
+        </div>
+        <div class="checkin-sub">By Fit Cube${c.service_name ? ' · ' + esc(c.service_name) : ''}</div>
+        <div class="checkin-bottom">
+          <div><div class="checkin-label">Receipt Number</div><div class="checkin-value">${c.receipt_number || '—'}</div></div>
+          <div><div class="checkin-label">Amount</div><div class="checkin-value">${c.amount !== null ? money(c.amount) : '—'}</div></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function openCheckinsFilterModal() {
+  openModal(`
+    <h3>Filter checkins</h3>
+    <label>Filter by date</label>
+    <div class="segmented" id="ck-filter-date">
+      <button data-mode="logs" class="${_checkinsFilterMode === 'logs' ? 'active' : ''}">Logs</button>
+      <button data-mode="day" class="${_checkinsFilterMode === 'day' ? 'active' : ''}">Day</button>
+      <button data-mode="month" class="${_checkinsFilterMode === 'month' ? 'active' : ''}">Month</button>
+      <button data-mode="year" class="${_checkinsFilterMode === 'year' ? 'active' : ''}">Year</button>
+    </div>
+    <label style="margin-top:14px">Search by</label>
+    <div class="segmented" id="ck-search-by">
+      <button data-mode="name" class="${_checkinsSearchBy === 'name' ? 'active' : ''}">Name</button>
+      <button data-mode="receipt" class="${_checkinsSearchBy === 'receipt' ? 'active' : ''}">Receipt Number</button>
+    </div>
+    <label style="margin-top:14px">Sort by</label>
+    <div class="segmented" id="ck-sort-by">
+      <button data-mode="date" class="${_checkinsSortBy === 'date' ? 'active' : ''}">Date</button>
+      <button data-mode="sales" class="${_checkinsSortBy === 'sales' ? 'active' : ''}">Sales</button>
+      <button data-mode="name" class="${_checkinsSortBy === 'name' ? 'active' : ''}">Name</button>
+    </div>
+    <div class="btn-row" style="margin-top:16px"><button class="btn block" id="ck-done">Done</button></div>
+  `);
+  const currentQuery = () => (document.getElementById('checkins-search') || {}).value?.trim().toLowerCase() || '';
+  const wireGroup = (id, apply) => {
+    document.querySelectorAll(`#${id} button`).forEach((b) => {
+      b.addEventListener('click', () => {
+        document.querySelectorAll(`#${id} button`).forEach((x) => x.classList.remove('active'));
+        b.classList.add('active');
+        apply(b.dataset.mode);
+        paintCheckinsBody(currentQuery());
+      });
+    });
+  };
+  wireGroup('ck-filter-date', (v) => { _checkinsFilterMode = v; _checkinsDrillKey = null; });
+  wireGroup('ck-search-by', (v) => { _checkinsSearchBy = v; });
+  wireGroup('ck-sort-by', (v) => { _checkinsSortBy = v; });
+  document.getElementById('ck-done').addEventListener('click', closeModal);
+}
+
 // ---------- sign in ----------
 
 // Who's using the app right now. Kept in memory; the actual proof of identity
@@ -2154,7 +2378,7 @@ async function renderSettings() {
       const text = await file.text();
       const dump = JSON.parse(text);
       const result = await api.restoreBackup(dump);
-      for (const store of ['clients', 'services', 'products', 'appointments', 'meta', 'packages']) {
+      for (const store of ['clients', 'services', 'products', 'appointments', 'meta', 'packages', 'checkins']) {
         await idb.clear(store);
       }
       alert('Restore complete: ' + result.restored.map((r) => `${r.table} (${r.count})`).join(', '));

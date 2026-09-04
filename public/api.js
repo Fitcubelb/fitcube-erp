@@ -456,6 +456,18 @@ const api = {
       return { data: await idb.getAll('packages'), fromCache: true };
     }
   },
+
+  // Every actual checkin (paid/unpaid session, or a redeemed credit) across
+  // every client, for the Checkins tab.
+  async listCheckins() {
+    try {
+      const data = await get('/api/checkins');
+      await idb.putAll('checkins', data);
+      return { data, fromCache: false };
+    } catch {
+      return { data: await idb.getAll('checkins'), fromCache: true };
+    }
+  },
   async createPackage(payload) {
     return rawFetch('POST', '/api/packages', payload);
   },

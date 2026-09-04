@@ -615,6 +615,16 @@ function normalizeSessionAmount(amount) {
   return { ok: true, value: n };
 }
 
+// Assigned only to rows that represent an actual checkin (see GET
+// /api/checkins) — a fresh paid/unpaid entry, or a redeemed credit — never
+// to an unredeemed credit-grant row. Starts at 100000 to look like a real
+// receipt number rather than a small internal id; existing rows before this
+// feature shipped are left NULL rather than backfilled.
+async function nextReceiptNumber() {
+  const row = (await db.execute(`SELECT COALESCE(MAX(receipt_number), 100000) + 1 as n FROM session_entries`)).rows[0];
+  return Number(row.n);
+}
+
 app.post('/api/clients/:id/sessions', async (req, res) => {
   const { service_id, session_date, payment_state, amount, tag, note } = req.body || {};
   if (!['prepaid', 'unpaid', 'paid_now'].includes(payment_state)) {
@@ -622,10 +632,13 @@ app.post('/api/clients/:id/sessions', async (req, res) => {
   }
   const amt = normalizeSessionAmount(amount);
   if (!amt.ok) return bad(res, 'amount must be a whole number, 0 or more');
+  // A plain prepaid entry from here (rather than "Give credits") is a manual
+  // ad-hoc credit grant, not a checkin someone actually made — no receipt.
+  const receiptNumber = payment_state === 'prepaid' ? null : await nextReceiptNumber();
   const r = await db.execute({
-    sql: `INSERT INTO session_entries (client_id, service_id, session_date, payment_state, amount, tag, note, source)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')`,
-    args: [req.params.id, service_id || null, session_date || null, payment_state, amt.value, tag || null, note || null],
+    sql: `INSERT INTO session_entries (client_id, service_id, session_date, payment_state, amount, tag, note, source, receipt_number)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', ?)`,
+    args: [req.params.id, service_id || null, session_date || null, payment_state, amt.value, tag || null, note || null, receiptNumber],
   });
   ok(res, { id: Number(r.lastInsertRowid) });
 });
@@ -850,16 +863,45 @@ app.post('/api/clients/:id/redeem-credit', async (req, res) => {
     })
   ).rows[0];
   if (!credit) return bad(res, 'No prepaid credits available for this client');
+  const receiptNumber = await nextReceiptNumber();
   await db.execute({
     sql: `UPDATE session_entries SET
             session_date = datetime('now'),
             service_id = COALESCE(?, service_id),
             note = COALESCE(?, note),
-            redeemed_at = datetime('now')
+            redeemed_at = datetime('now'),
+            receipt_number = ?
           WHERE id=?`,
-    args: [service_id || null, note || null, credit.id],
+    args: [service_id || null, note || null, receiptNumber, credit.id],
   });
-  ok(res, { id: credit.id });
+  ok(res, { id: credit.id, receipt_number: receiptNumber });
+});
+
+// ---------- Checkins ----------
+
+// Everything that counts as an actual visit — a paid or unpaid session, or a
+// redeemed prepaid credit — across every client, for the Checkins tab.
+// source='manual' only: legacy_import rows are outstanding balances migrated
+// from the old paper ledger (no real visit date, never actually "checked
+// in" through the app), not real checkins — they still count toward the
+// "Owed" figures elsewhere, just not this log. Not owner-gated: staff
+// already see individual session amounts on a client's own page (only
+// aggregate revenue/profit reporting is owner-only), so this follows suit.
+app.get('/api/checkins', async (req, res) => {
+  const rows = (
+    await db.execute(`
+      SELECT se.id, se.client_id, c.name as client_name, se.service_id, sv.name as service_name,
+             se.session_date, se.created_at, se.payment_state, se.amount, se.receipt_number, se.note
+      FROM session_entries se
+      JOIN clients c ON c.id = se.client_id
+      LEFT JOIN services sv ON sv.id = se.service_id
+      WHERE se.source = 'manual'
+        AND (se.payment_state IN ('paid_now','unpaid')
+             OR (se.payment_state='prepaid' AND se.redeemed_at IS NOT NULL))
+      ORDER BY COALESCE(se.session_date, se.created_at) DESC
+    `)
+  ).rows;
+  ok(res, rows);
 });
 
 // ---------- Sales ----------
