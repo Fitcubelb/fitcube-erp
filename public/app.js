@@ -317,10 +317,36 @@ function paintClientsList(data, fromCache) {
 
 const CONTACT_PICKER_SUPPORTED = 'contacts' in navigator && 'ContactsManager' in window;
 
+// Renders a "Choose from Contacts" button (Android Chrome only — iOS Safari
+// doesn't let web apps browse the address book at all) and wires it up to
+// fill the given phone input (and optionally a name input) from the picked
+// contact. Call contactPickerButtonHtml() where the button should render,
+// then wireContactPicker() after the modal's HTML is in the DOM.
+function contactPickerButtonHtml(btnId) {
+  return CONTACT_PICKER_SUPPORTED
+    ? `<button type="button" class="btn secondary block" id="${btnId}" style="margin-bottom:6px">Choose from Contacts</button>`
+    : '';
+}
+function wireContactPicker(btnId, phoneInputId, nameInputId) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    try {
+      const [contact] = await navigator.contacts.select(['name', 'tel'], { multiple: false });
+      if (contact) {
+        if (nameInputId && contact.name && contact.name[0]) document.getElementById(nameInputId).value = contact.name[0];
+        if (contact.tel && contact.tel[0]) document.getElementById(phoneInputId).value = contact.tel[0];
+      }
+    } catch (err) {
+      // user cancelled the picker, or permission denied — nothing to do
+    }
+  });
+}
+
 function openAddClientModal() {
   openModal(`
     <h3>New client</h3>
-    ${CONTACT_PICKER_SUPPORTED ? `<button class="btn secondary block" id="pick-contact-btn" style="margin-bottom:6px">Choose from Contacts</button>` : ''}
+    ${contactPickerButtonHtml('pick-contact-btn')}
     <label>Name</label><input id="f-name" placeholder="Full name" autocomplete="name" />
     <label>Phone</label><input id="f-phone" placeholder="70 123 456" autocomplete="tel" type="tel" />
     <label>Notes</label><textarea id="f-notes" placeholder="Optional"></textarea>
@@ -331,20 +357,7 @@ function openAddClientModal() {
     ${!CONTACT_PICKER_SUPPORTED ? `<div class="sub" style="margin-top:8px">Tip: tap into Name or Phone — your phone may suggest matching contacts as you type.</div>` : ''}
     <div class="btn-row"><button class="btn block" id="f-save">Save client</button></div>
   `);
-  const pickBtn = document.getElementById('pick-contact-btn');
-  if (pickBtn) {
-    pickBtn.addEventListener('click', async () => {
-      try {
-        const [contact] = await navigator.contacts.select(['name', 'tel'], { multiple: false });
-        if (contact) {
-          if (contact.name && contact.name[0]) document.getElementById('f-name').value = contact.name[0];
-          if (contact.tel && contact.tel[0]) document.getElementById('f-phone').value = contact.tel[0];
-        }
-      } catch (err) {
-        // user cancelled the picker, or permission denied — nothing to do
-      }
-    });
-  }
+  wireContactPicker('pick-contact-btn', 'f-phone', 'f-name');
   document.getElementById('f-save').addEventListener('click', async () => {
     const name = document.getElementById('f-name').value.trim();
     if (!name) return;
@@ -381,7 +394,6 @@ async function renderClientDetail(id) {
       <div class="btn-row">
         <button class="btn secondary" id="edit-client-btn">Edit contact info</button>
         ${c.phone ? `<button class="btn secondary" id="remind-btn">Remind</button>` : ''}
-        ${c.music_link ? `<button class="btn secondary" id="music-btn">${musicPlatformInfo(c.music_link).icon} Play on ${musicPlatformInfo(c.music_link).label}</button>` : ''}
       </div>
     </div>
 
@@ -408,6 +420,13 @@ async function renderClientDetail(id) {
       ${metrics.length ? [...metrics].reverse().map((m) => metricRowHtml(m)).join('') : '<div class="empty">No progress metrics logged yet.</div>'}
     </div>
     <button class="btn secondary block" id="add-metric-btn" style="margin-bottom:14px">+ Log weight / measurements</button>
+
+    ${c.music_link ? `
+    <h2>Preferred music</h2>
+    <div class="card">
+      <button class="btn secondary block" id="music-btn">${musicPlatformInfo(c.music_link).icon} Play on ${musicPlatformInfo(c.music_link).label}</button>
+    </div>
+    ` : ''}
 
     <h2>Session history</h2>
     <div class="card">
@@ -502,6 +521,7 @@ function openEditClientModal(c) {
     <h3>Edit ${esc(c.name)}</h3>
     <label>Name</label><input id="f-name" value="${esc(c.name)}" />
     <label>Phone</label><input id="f-phone" value="${esc(c.phone || '')}" />
+    ${contactPickerButtonHtml('pick-contact-btn')}
     <label>Notes</label><textarea id="f-notes">${esc(c.notes || '')}</textarea>
     <label>Goal</label>
     <input id="f-goal" value="${esc(c.goal || '')}" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
@@ -512,6 +532,7 @@ function openEditClientModal(c) {
       <button class="btn danger" id="f-archive">Archive client</button>
     </div>
   `);
+  wireContactPicker('pick-contact-btn', 'f-phone', null);
   document.getElementById('f-save').addEventListener('click', async () => {
     const name = document.getElementById('f-name').value.trim();
     if (!name) { alert('Name is required.'); return; }
@@ -746,7 +767,6 @@ async function openSendReminderModal(c, unpaidTotal, nextAppt) {
     <select id="f-template">${templates.map((t) => `<option value="${t.id}" ${t.id === preferred.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
     <label>Message (edit freely before sending)</label>
     <textarea id="f-message" rows="4">${esc(fillTemplate(preferred.body, vars))}</textarea>
-    <div class="sub" style="margin-top:4px">Placeholders available: {name}, {service}, {when}, {amount}</div>
     <div class="btn-row"><button class="btn block" id="f-send">Send via WhatsApp</button></div>
     <button type="button" class="btn secondary block" id="f-manage-templates" style="margin-top:8px">Manage message templates</button>
   `);
@@ -967,6 +987,7 @@ function openNewAppointmentModal(clientsIn, servicesIn, onSaved) {
     <div id="f-client-picked" class="sub" style="margin-top:6px"></div>
     <button type="button" class="btn secondary" id="f-client-new-toggle" style="margin-top:8px;padding:6px 10px;font-size:0.78rem">+ Add new client</button>
     <div id="f-client-new-fields" hidden style="margin-top:6px">
+      ${contactPickerButtonHtml('f-newclient-pick-contact')}
       <label>Name</label><input id="f-newclient-name" placeholder="Full name" autocomplete="name" />
       <label>Phone</label><input id="f-newclient-phone" placeholder="70 123 456" type="tel" autocomplete="tel" />
     </div>
@@ -986,6 +1007,8 @@ function openNewAppointmentModal(clientsIn, servicesIn, onSaved) {
     <label>Note</label><input id="f-note" placeholder="Optional" />
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
+
+  wireContactPicker('f-newclient-pick-contact', 'f-newclient-phone', 'f-newclient-name');
 
   const searchInput = document.getElementById('f-client-search');
   const suggestBox = document.getElementById('f-client-suggestions');
