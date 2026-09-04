@@ -1,0 +1,5 @@
+node_modules/
+.env
+server/db/fitcube.db
+server/db/fitcube.db-*
+*.log

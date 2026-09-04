@@ -1,0 +1,16 @@
+# Render "Blueprint" — lets you deploy by pointing Render at this repo
+# instead of clicking through the manual setup. See README.md for both
+# options. Free web service: no persistent disk, so the database lives in
+# Turso (also free) instead of the local SQLite file.
+services:
+  - type: web
+    name: fitcube-erp
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

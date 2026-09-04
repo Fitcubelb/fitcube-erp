@@ -1,0 +1,21 @@
+{
+  "name": "fitcube-erp",
+  "version": "1.0.0",
+  "description": "Fit Cube ERP - client, session, schedule, sales and inventory management for Anthony Zakka's personal training and physical therapy studio.",
+  "main": "server/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "seed": "node server/db/seed.js"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

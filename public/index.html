@@ -1,0 +1,39 @@
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Fit Cube</title>
+<meta name="theme-color" content="#0b0f14" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="stylesheet" href="/styles.css" />
+
+<div id="app">
+  <header class="topbar">
+    <div class="brand">Fit Cube</div>
+    <div id="status-pill" class="status-pill">●</div>
+  </header>
+
+  <main id="view"></main>
+
+  <nav class="tabbar">
+    <button class="tab" data-route="dashboard"><span class="ic">⌂</span><span>Home</span></button>
+    <button class="tab" data-route="clients"><span class="ic">☺</span><span>Clients</span></button>
+    <button class="tab" data-route="schedule"><span class="ic">▦</span><span>Schedule</span></button>
+    <button class="tab" data-route="inventory"><span class="ic">▣</span><span>Stock</span></button>
+    <button class="tab" data-route="sales"><span class="ic">$</span><span>Sales</span></button>
+  </nav>
+</div>
+
+<div id="modal-root"></div>
+
+<script src="/db.js"></script>
+<script src="/api.js"></script>
+<script src="/sync.js"></script>
+<script src="/app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
+  }
+</script>
