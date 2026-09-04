@@ -118,12 +118,12 @@ app.get('/api/services', async (req, res) => {
 
 app.post('/api/services', async (req, res) => {
   const { name, category, default_price } = req.body || {};
-  if (!name) return bad(res, 'name is required');
+  if (!name || !name.trim()) return bad(res, 'name is required');
   const r = await db.execute({
     sql: 'INSERT INTO services (name, category, default_price) VALUES (?, ?, ?)',
-    args: [name, category || null, default_price ?? null],
+    args: [name.trim(), category || null, default_price ?? null],
   });
-  ok(res, { id: Number(r.lastInsertRowid) });
+  ok(res, { id: Number(r.lastInsertRowid), name: name.trim(), category: category || null, default_price: default_price ?? null });
 });
 
 // ---------- Session entries (the paid/unpaid log) ----------
@@ -360,6 +360,19 @@ app.get('/api/dashboard/summary', async (req, res) => {
   const clientCount = (await db.execute('SELECT COUNT(*) as n FROM clients WHERE archived=0')).rows[0];
   const sessionRevenue = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL`)).rows[0];
   const productRevenue = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM sales')).rows[0];
+  // Cost of goods sold: what the products actually sold cost you, valued at
+  // each product's current cost price (this app doesn't snapshot historical
+  // cost per sale, so if you change a cost price, past COGS re-values too —
+  // close enough for a small studio's books, not audit-grade accounting).
+  const cogs = (
+    await db.execute(`
+      SELECT COALESCE(SUM(si.qty * p.cost_price), 0) as total
+      FROM sale_items si JOIN products p ON p.id = si.product_id
+    `)
+  ).rows[0];
+  const purchasesTotal = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM purchases')).rows[0];
+  const inventoryValue = (await db.execute('SELECT COALESCE(SUM(qty_on_hand * cost_price),0) as total FROM products')).rows[0];
+  const revenueTotal = Number(sessionRevenue.total) + Number(productRevenue.total);
   ok(res, {
     unpaid_total: Number(unpaid.total),
     unpaid_entries: Number(unpaid.n),
@@ -367,7 +380,13 @@ app.get('/api/dashboard/summary', async (req, res) => {
     low_stock_products: Number(lowStock.n),
     appointments_today: Number(todayCount.n),
     active_clients: Number(clientCount.n),
-    revenue_total: Number(sessionRevenue.total) + Number(productRevenue.total),
+    revenue_total: revenueTotal,
+    session_revenue_total: Number(sessionRevenue.total),
+    product_revenue_total: Number(productRevenue.total),
+    cogs_total: Number(cogs.total),
+    gross_profit: revenueTotal - Number(cogs.total),
+    purchases_total: Number(purchasesTotal.total),
+    inventory_value: Number(inventoryValue.total),
   });
 });
 

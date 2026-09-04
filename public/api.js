@@ -92,6 +92,14 @@ const api = {
     }
   },
 
+  async createService(payload) {
+    const result = await mutate('POST', '/api/services', payload);
+    const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
+    const record = { id, active: 1, _pending: result.offline, ...payload };
+    await idb.put('services', record);
+    return { id, offline: result.offline, ...record };
+  },
+
   async listAppointments(params = '') {
     try {
       const data = await get(`/api/appointments${params}`);

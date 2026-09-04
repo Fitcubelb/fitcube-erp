@@ -150,6 +150,20 @@ async function renderDashboard() {
       <div class="card"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
+
+    <h2>Profit &amp; loss</h2>
+    <div class="card">
+      <div class="grid-2" style="margin-bottom:12px">
+        <div><div class="stat" style="color:var(--accent)">${money(data.gross_profit)}</div><div class="stat-label">Gross profit</div></div>
+        <div><div class="stat" style="color:var(--unpaid)">${money(data.cogs_total)}</div><div class="stat-label">Cost of goods sold</div></div>
+      </div>
+      <div class="session-row"><div>Session revenue</div><div>${money(data.session_revenue_total)}</div></div>
+      <div class="session-row"><div>Product sales revenue</div><div>${money(data.product_revenue_total)}</div></div>
+      <div class="session-row"><div>Money spent restocking</div><div>${money(data.purchases_total)}</div></div>
+      <div class="session-row"><div>Current inventory value (at cost)</div><div>${money(data.inventory_value)}</div></div>
+      <div class="sub" style="margin-top:8px">Gross profit = all revenue (sessions + product sales) minus what the sold products cost you. Sessions have no product cost, so most of your profit lives there. Restocking spend and inventory value are shown for reference — they don't reduce profit until stock is sold.</div>
+    </div>
+
     <h2>Quick actions</h2>
     <div class="btn-row">
       <button class="btn block" onclick="location.hash='#/clients'">View clients</button>
@@ -525,19 +539,28 @@ async function openAddAppointmentModal(clientId) {
 async function renderSchedule() {
   viewEl.innerHTML = `<h1>Schedule</h1><div class="empty">Loading…</div>`;
   const { data, fromCache } = await api.listAppointments();
-  const upcoming = data.filter((a) => a.status === 'scheduled').sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
-  const groups = {};
-  upcoming.forEach((a) => {
-    const day = (a.starts_at || '').slice(0, 10);
-    (groups[day] = groups[day] || []).push(a);
-  });
-  const dayKeys = Object.keys(groups).sort();
+  paintSchedule(data, fromCache);
+}
+
+function paintSchedule(data, fromCache) {
+  const upcomingAll = data.filter((a) => a.status === 'scheduled').sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
 
   viewEl.innerHTML = `
     <h1>Schedule</h1>
     ${fromCache ? `<div class="sync-banner">Showing saved data — you're offline.</div>` : ''}
-    <div id="sched-body">
-      ${dayKeys.length ? dayKeys.map((day) => `
+    <input class="search" id="sched-search" placeholder="Search by client or service…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+    <div id="sched-body"></div>
+    <button class="fab" id="add-appt-fab" title="Add appointment">+</button>
+  `;
+
+  const paintBody = (list) => {
+    const groups = {};
+    list.forEach((a) => {
+      const day = (a.starts_at || '').slice(0, 10);
+      (groups[day] = groups[day] || []).push(a);
+    });
+    const dayKeys = Object.keys(groups).sort();
+    document.getElementById('sched-body').innerHTML = dayKeys.length ? dayKeys.map((day) => `
         <h2>${new Date(day + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</h2>
         <div class="card">
           ${groups[day].map((a) => `
@@ -552,82 +575,214 @@ async function renderSchedule() {
                 <button class="btn danger" style="padding:6px 8px;font-size:0.75rem" data-cancel="${a.id}">✕</button>
               </div>
             </div>`).join('')}
-        </div>`).join('') : '<div class="empty">No upcoming appointments.</div>'}
-    </div>
-    <button class="fab" id="add-appt-fab" title="Add appointment">+</button>
-  `;
+        </div>`).join('') : `<div class="empty">${upcomingAll.length ? 'No appointments match your search.' : 'No upcoming appointments.'}</div>`;
+
+    viewEl.querySelectorAll('[data-remind]').forEach((btn) => btn.addEventListener('click', () => {
+      const a = list.find((x) => String(x.id) === btn.dataset.remind);
+      if (!a) return;
+      const msg = `Hi ${a.client_name}, reminder from Fit Cube: your ${a.service_name || 'session'} is on ${fmtDate(a.starts_at)}. See you then!`;
+      sendWhatsAppReminder({ name: a.client_name, phone: a.client_phone }, msg, [a.client_name, a.service_name || 'session', fmtDate(a.starts_at)]);
+    }));
+    viewEl.querySelectorAll('[data-done]').forEach((btn) => btn.addEventListener('click', async () => {
+      await api.updateAppointment(btn.dataset.done, { status: 'completed' });
+      renderSchedule();
+    }));
+    viewEl.querySelectorAll('[data-cancel]').forEach((btn) => btn.addEventListener('click', async () => {
+      await api.updateAppointment(btn.dataset.cancel, { status: 'cancelled' });
+      renderSchedule();
+    }));
+  };
+
+  paintBody(upcomingAll);
+  document.getElementById('sched-search').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    paintBody(upcomingAll.filter((a) =>
+      (a.client_name || '').toLowerCase().includes(q) || (a.service_name || '').toLowerCase().includes(q)
+    ));
+  });
 
   document.getElementById('add-appt-fab').addEventListener('click', async () => {
     const { data: clients } = await api.listClients();
     const { data: services } = await api.listServices();
-    openModal(`
-      <h3>New appointment</h3>
-      <label>Client</label>
-      <select id="f-client">${clients.filter((c) => !c.archived).map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
-      <label>Service</label>
-      <select id="f-service"><option value="">— general —</option>${services.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
-      <label>Date &amp; time</label>
-      <input id="f-when" type="datetime-local" value="${todayLocalISO()}" />
-      <label>Duration (minutes)</label>
-      <input id="f-duration" type="number" value="60" />
-      <label>Note</label><input id="f-note" placeholder="Optional" />
-      <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
-    `);
-    document.getElementById('f-save').addEventListener('click', async () => {
-      await api.createAppointment({
-        client_id: document.getElementById('f-client').value,
-        service_id: document.getElementById('f-service').value || null,
-        starts_at: document.getElementById('f-when').value,
-        duration_minutes: Number(document.getElementById('f-duration').value) || 60,
-        note: document.getElementById('f-note').value.trim() || null,
+    openNewAppointmentModal(clients.filter((c) => !c.archived), services, () => renderSchedule());
+  });
+}
+
+// Searchable client field + inline "add new client" / "add new service" —
+// used from the Schedule tab so a booking never has to be interrupted by a
+// trip to the Clients tab just because someone's new or a service is missing.
+function openNewAppointmentModal(clientsIn, servicesIn, onSaved) {
+  let clients = [...clientsIn];
+  let services = [...servicesIn];
+  let selectedClientId = null;
+  let selectedClientName = '';
+
+  openModal(`
+    <h3>New appointment</h3>
+
+    <label>Client</label>
+    <div class="combo-wrap">
+      <input id="f-client-search" class="search" style="margin-bottom:0" placeholder="Search clients by name…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <div id="f-client-suggestions" class="combo-suggestions" hidden></div>
+    </div>
+    <div id="f-client-picked" class="sub" style="margin-top:6px"></div>
+    <button type="button" class="btn secondary" id="f-client-new-toggle" style="margin-top:8px;padding:6px 10px;font-size:0.78rem">+ Add new client</button>
+    <div id="f-client-new-fields" hidden style="margin-top:6px">
+      <label>Name</label><input id="f-newclient-name" placeholder="Full name" autocomplete="name" />
+      <label>Phone</label><input id="f-newclient-phone" placeholder="70 123 456" type="tel" autocomplete="tel" />
+    </div>
+
+    <label style="margin-top:16px">Service</label>
+    <select id="f-service"><option value="">— general —</option>${services.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+    <button type="button" class="btn secondary" id="f-service-new-toggle" style="margin-top:8px;padding:6px 10px;font-size:0.78rem">+ Add new service</button>
+    <div id="f-service-new-fields" hidden style="margin-top:6px">
+      <label>Service name</label><input id="f-newservice-name" placeholder="e.g. Deep tissue massage" />
+      <label>Default price (optional)</label><input id="f-newservice-price" type="number" step="0.01" placeholder="e.g. 30" />
+    </div>
+
+    <label>Date &amp; time</label>
+    <input id="f-when" type="datetime-local" value="${todayLocalISO()}" />
+    <label>Duration (minutes)</label>
+    <input id="f-duration" type="number" value="60" />
+    <label>Note</label><input id="f-note" placeholder="Optional" />
+    <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
+  `);
+
+  const searchInput = document.getElementById('f-client-search');
+  const suggestBox = document.getElementById('f-client-suggestions');
+  const pickedLabel = document.getElementById('f-client-picked');
+
+  function pickClient(c) {
+    selectedClientId = c.id;
+    selectedClientName = c.name;
+    searchInput.value = c.name;
+    pickedLabel.textContent = `Selected: ${c.name}${c.phone ? ' · ' + c.phone : ''}`;
+    suggestBox.hidden = true;
+  }
+
+  function renderSuggestions(q) {
+    const query = q.trim().toLowerCase();
+    const matches = (query ? clients.filter((c) => c.name.toLowerCase().includes(query) || (c.phone || '').includes(query)) : clients).slice(0, 25);
+    if (!matches.length) {
+      suggestBox.innerHTML = `<div class="combo-empty">No matching clients — tap "+ Add new client" below.</div>`;
+    } else {
+      suggestBox.innerHTML = matches.map((c) => `<div class="combo-item" data-id="${c.id}">${esc(c.name)}${c.phone ? `<span class="sub" style="margin-left:6px">${esc(c.phone)}</span>` : ''}</div>`).join('');
+      suggestBox.querySelectorAll('.combo-item').forEach((row) => {
+        row.addEventListener('mousedown', (e) => { // mousedown fires before the input's blur
+          e.preventDefault();
+          const c = clients.find((x) => String(x.id) === row.dataset.id);
+          if (c) pickClient(c);
+        });
       });
-      closeModal();
-      renderSchedule();
-    });
+    }
+    suggestBox.hidden = false;
+  }
+
+  searchInput.addEventListener('input', () => {
+    selectedClientId = null;
+    pickedLabel.textContent = '';
+    renderSuggestions(searchInput.value);
+  });
+  searchInput.addEventListener('focus', () => renderSuggestions(searchInput.value));
+  searchInput.addEventListener('blur', () => setTimeout(() => { suggestBox.hidden = true; }, 150));
+
+  const clientNewToggle = document.getElementById('f-client-new-toggle');
+  const clientNewFields = document.getElementById('f-client-new-fields');
+  clientNewToggle.addEventListener('click', () => {
+    const showing = !clientNewFields.hidden;
+    clientNewFields.hidden = showing;
+    clientNewToggle.textContent = showing ? '+ Add new client' : '– Cancel new client';
+    if (!showing) document.getElementById('f-newclient-name').focus();
   });
 
-  viewEl.querySelectorAll('[data-remind]').forEach((btn) => btn.addEventListener('click', () => {
-    const a = upcoming.find((x) => String(x.id) === btn.dataset.remind);
-    if (!a) return;
-    const msg = `Hi ${a.client_name}, reminder from Fit Cube: your ${a.service_name || 'session'} is on ${fmtDate(a.starts_at)}. See you then!`;
-    sendWhatsAppReminder({ name: a.client_name, phone: a.client_phone }, msg, [a.client_name, a.service_name || 'session', fmtDate(a.starts_at)]);
-  }));
-  viewEl.querySelectorAll('[data-done]').forEach((btn) => btn.addEventListener('click', async () => {
-    await api.updateAppointment(btn.dataset.done, { status: 'completed' });
-    renderSchedule();
-  }));
-  viewEl.querySelectorAll('[data-cancel]').forEach((btn) => btn.addEventListener('click', async () => {
-    await api.updateAppointment(btn.dataset.cancel, { status: 'cancelled' });
-    renderSchedule();
-  }));
+  const serviceNewToggle = document.getElementById('f-service-new-toggle');
+  const serviceNewFields = document.getElementById('f-service-new-fields');
+  serviceNewToggle.addEventListener('click', () => {
+    const showing = !serviceNewFields.hidden;
+    serviceNewFields.hidden = showing;
+    serviceNewToggle.textContent = showing ? '+ Add new service' : '– Cancel new service';
+    if (!showing) document.getElementById('f-newservice-name').focus();
+  });
+
+  document.getElementById('f-save').addEventListener('click', async () => {
+    let clientId = selectedClientId;
+    if (!clientNewFields.hidden) {
+      const name = document.getElementById('f-newclient-name').value.trim();
+      if (!name) { alert('Enter a name for the new client.'); return; }
+      const phone = document.getElementById('f-newclient-phone').value.trim();
+      const result = await api.createClient({ name, phone: phone || null });
+      clientId = result.id;
+    }
+    if (!clientId) { alert('Search for a client and pick one, or tap "+ Add new client".'); return; }
+
+    let serviceId = document.getElementById('f-service').value || null;
+    if (!serviceNewFields.hidden) {
+      const sname = document.getElementById('f-newservice-name').value.trim();
+      if (sname) {
+        const price = document.getElementById('f-newservice-price').value;
+        const result = await api.createService({ name: sname, default_price: price ? Number(price) : null });
+        serviceId = result.id;
+      }
+    }
+
+    await api.createAppointment({
+      client_id: clientId,
+      service_id: serviceId,
+      starts_at: document.getElementById('f-when').value,
+      duration_minutes: Number(document.getElementById('f-duration').value) || 60,
+      note: document.getElementById('f-note').value.trim() || null,
+    });
+    closeModal();
+    onSaved();
+  });
 }
 
 // ---------- inventory ----------
 
+let _productsCache = [];
+
 async function renderInventory() {
   viewEl.innerHTML = `<h1>Stock</h1><div class="empty">Loading…</div>`;
   const { data, fromCache } = await api.listProducts();
+  _productsCache = data;
+  paintInventory(data, fromCache);
+}
+
+function paintInventory(data, fromCache) {
   viewEl.innerHTML = `
     <h1>Stock</h1>
     ${fromCache ? `<div class="sync-banner">Showing saved data — you're offline.</div>` : ''}
-    <div id="prod-rows">
-      ${data.length ? data.map((p) => `
-        <div class="list-row" data-id="${p.id}">
-          <div><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.category || '')}${p.sku ? ' · ' + esc(p.sku) : ''}</div></div>
-          <div>
-            <span class="badge ${Number(p.qty_on_hand) <= Number(p.reorder_level) ? 'unpaid' : 'neutral'}">${p.qty_on_hand} in stock</span>
-          </div>
-        </div>`).join('') : '<div class="empty">No products yet.</div>'}
-    </div>
+    <input class="search" id="prod-search" placeholder="Search products…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+    <div id="prod-rows"></div>
     <button class="fab" id="add-prod-fab" title="Add product">+</button>
   `;
-  document.getElementById('add-prod-fab').addEventListener('click', openAddProductModal);
-  document.querySelectorAll('#prod-rows .list-row').forEach((row) => {
-    row.addEventListener('click', () => {
-      const p = data.find((x) => String(x.id) === row.dataset.id);
-      openEditProductModal(p);
+  const paintRows = (list) => {
+    const el = document.getElementById('prod-rows');
+    if (!list.length) { el.innerHTML = `<div class="empty">${data.length ? 'No products found.' : 'No products yet.'}</div>`; return; }
+    el.innerHTML = list.map((p) => `
+      <div class="list-row" data-id="${p.id}">
+        <div><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.category || '')}${p.sku ? ' · ' + esc(p.sku) : ''}</div></div>
+        <div>
+          <span class="badge ${Number(p.qty_on_hand) <= Number(p.reorder_level) ? 'unpaid' : 'neutral'}">${p.qty_on_hand} in stock</span>
+        </div>
+      </div>`).join('');
+    el.querySelectorAll('.list-row').forEach((row) => {
+      row.addEventListener('click', () => {
+        const p = data.find((x) => String(x.id) === row.dataset.id);
+        openEditProductModal(p);
+      });
     });
+  };
+  paintRows(data);
+  document.getElementById('prod-search').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    paintRows(data.filter((p) =>
+      p.name.toLowerCase().includes(q) ||
+      (p.category || '').toLowerCase().includes(q) ||
+      (p.sku || '').toLowerCase().includes(q)
+    ));
   });
+  document.getElementById('add-prod-fab').addEventListener('click', openAddProductModal);
 }
 
 function openAddProductModal() {
