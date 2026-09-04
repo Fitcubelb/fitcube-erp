@@ -1276,19 +1276,24 @@ async function openLogSessionModal(clientId) {
       <option value="unpaid">Unpaid (owes money)</option>
       <option value="paid_now">Paid now (settle immediately)</option>
     </select>
-    <label>Amount (optional for a plain credit/session)</label>
-    <input id="f-amount" type="number" step="0.01" placeholder="e.g. 30" />
+    <label>Amount (optional for a plain credit/session, whole dollars only)</label>
+    <input id="f-amount" type="number" step="1" min="0" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 30" />
     <label>Tag</label>
     <select id="f-tag"><option value="">none</option><option value="ems">EMS</option><option value="presso">Presso Therapy</option><option value="kids">Kids training</option></select>
     <label>Note</label><input id="f-note" placeholder="Optional" />
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
   guardedClick('f-save', async () => {
-    const amount = document.getElementById('f-amount').value;
+    const amountRaw = document.getElementById('f-amount').value;
+    const amount = amountRaw ? Math.round(Number(amountRaw)) : null;
+    if (amount !== null && (Number.isNaN(amount) || amount < 0)) {
+      alert('Amount must be a whole number, 0 or more.');
+      return;
+    }
     await api.logSession(clientId, {
       service_id: document.getElementById('f-service').value || null,
       payment_state: document.getElementById('f-state').value,
-      amount: amount ? Number(amount) : null,
+      amount,
       tag: document.getElementById('f-tag').value || null,
       note: document.getElementById('f-note').value.trim() || null,
     });

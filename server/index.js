@@ -594,21 +594,34 @@ app.post('/api/services', async (req, res) => {
 
 // ---------- Session entries (the paid/unpaid log) ----------
 
+// Session amounts are whole dollars only (no cents). Returns { ok: true, value }
+// or { ok: false } if the amount isn't a non-negative whole number.
+function normalizeSessionAmount(amount) {
+  if (amount === undefined || amount === null || amount === '') return { ok: true, value: null };
+  const n = Math.round(Number(amount));
+  if (!Number.isFinite(n) || n < 0) return { ok: false };
+  return { ok: true, value: n };
+}
+
 app.post('/api/clients/:id/sessions', async (req, res) => {
   const { service_id, session_date, payment_state, amount, tag, note } = req.body || {};
   if (!['prepaid', 'unpaid', 'paid_now'].includes(payment_state)) {
     return bad(res, 'payment_state must be prepaid, unpaid or paid_now');
   }
+  const amt = normalizeSessionAmount(amount);
+  if (!amt.ok) return bad(res, 'amount must be a whole number, 0 or more');
   const r = await db.execute({
     sql: `INSERT INTO session_entries (client_id, service_id, session_date, payment_state, amount, tag, note, source)
           VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')`,
-    args: [req.params.id, service_id || null, session_date || null, payment_state, amount ?? null, tag || null, note || null],
+    args: [req.params.id, service_id || null, session_date || null, payment_state, amt.value, tag || null, note || null],
   });
   ok(res, { id: Number(r.lastInsertRowid) });
 });
 
 app.put('/api/sessions/:id', async (req, res) => {
   const { payment_state, amount, tag, note, session_date, service_id } = req.body || {};
+  const amt = normalizeSessionAmount(amount);
+  if (!amt.ok) return bad(res, 'amount must be a whole number, 0 or more');
   await db.execute({
     sql: `UPDATE session_entries SET
             payment_state = COALESCE(?, payment_state),
@@ -618,7 +631,7 @@ app.put('/api/sessions/:id', async (req, res) => {
             session_date = COALESCE(?, session_date),
             service_id = COALESCE(?, service_id)
           WHERE id=?`,
-    args: [payment_state ?? null, amount ?? null, tag ?? null, note ?? null, session_date ?? null, service_id ?? null, req.params.id],
+    args: [payment_state ?? null, amt.value, tag ?? null, note ?? null, session_date ?? null, service_id ?? null, req.params.id],
   });
   ok(res, { ok: true });
 });
