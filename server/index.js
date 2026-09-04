@@ -858,10 +858,57 @@ app.get('/api/dashboard/summary', async (req, res) => {
       gross_profit: revenueTotal - Number(cogs.total),
       purchases_total: Number(purchasesTotal.total),
       inventory_value: Number(inventoryValue.total),
+      profit_periods: await profitByPeriod(),
     });
   }
   ok(res, summary);
 });
+
+// Same profit definition as the Accounting page's headline number (revenue
+// minus cost of goods sold), broken into how much of it landed today, this
+// week, this month, this year, and all time — one query per money source, each
+// bucketing all five periods at once with conditional SUMs rather than
+// running the same query five times over.
+async function profitByPeriod() {
+  const revenue = (
+    await db.execute(`
+      SELECT
+        COALESCE(SUM(amount), 0) as all_time,
+        COALESCE(SUM(CASE WHEN date(COALESCE(session_date, created_at)) = date('now') THEN amount ELSE 0 END), 0) as today,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%W', COALESCE(session_date, created_at)) = strftime('%Y-%W', 'now') THEN amount ELSE 0 END), 0) as this_week,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%m', COALESCE(session_date, created_at)) = strftime('%Y-%m', 'now') THEN amount ELSE 0 END), 0) as this_month,
+        COALESCE(SUM(CASE WHEN strftime('%Y', COALESCE(session_date, created_at)) = strftime('%Y', 'now') THEN amount ELSE 0 END), 0) as this_year
+      FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL
+    `)
+  ).rows[0];
+  const sales = (
+    await db.execute(`
+      SELECT
+        COALESCE(SUM(total), 0) as all_time,
+        COALESCE(SUM(CASE WHEN date(sale_date) = date('now') THEN total ELSE 0 END), 0) as today,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%W', sale_date) = strftime('%Y-%W', 'now') THEN total ELSE 0 END), 0) as this_week,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%m', sale_date) = strftime('%Y-%m', 'now') THEN total ELSE 0 END), 0) as this_month,
+        COALESCE(SUM(CASE WHEN strftime('%Y', sale_date) = strftime('%Y', 'now') THEN total ELSE 0 END), 0) as this_year
+      FROM sales
+    `)
+  ).rows[0];
+  const cogsByPeriod = (
+    await db.execute(`
+      SELECT
+        COALESCE(SUM(si.qty * p.cost_price), 0) as all_time,
+        COALESCE(SUM(CASE WHEN date(s.sale_date) = date('now') THEN si.qty * p.cost_price ELSE 0 END), 0) as today,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%W', s.sale_date) = strftime('%Y-%W', 'now') THEN si.qty * p.cost_price ELSE 0 END), 0) as this_week,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%m', s.sale_date) = strftime('%Y-%m', 'now') THEN si.qty * p.cost_price ELSE 0 END), 0) as this_month,
+        COALESCE(SUM(CASE WHEN strftime('%Y', s.sale_date) = strftime('%Y', 'now') THEN si.qty * p.cost_price ELSE 0 END), 0) as this_year
+      FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN products p ON p.id = si.product_id
+    `)
+  ).rows[0];
+  const periods = {};
+  for (const p of ['all_time', 'today', 'this_week', 'this_month', 'this_year']) {
+    periods[p] = Number(revenue[p]) + Number(sales[p]) - Number(cogsByPeriod[p]);
+  }
+  return periods;
+}
 
 // ---------- Reports ----------
 

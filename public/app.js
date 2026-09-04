@@ -246,6 +246,24 @@ async function renderDashboard() {
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
 
+    ${isOwner() && data.profit_periods ? `
+    <h2>Profit</h2>
+    <div class="card">
+      <div class="stat" style="color:var(--accent)">${money(data.profit_periods.all_time)}</div>
+      <div class="stat-label">Total profit, all time</div>
+    </div>
+    <div class="segmented" id="profit-period">
+      <button data-period="today" class="active">Today</button>
+      <button data-period="this_week">This week</button>
+      <button data-period="this_month">This month</button>
+      <button data-period="this_year">This year</button>
+    </div>
+    <div class="card">
+      <div class="stat" id="profit-period-value" style="color:var(--accent)">${money(data.profit_periods.today)}</div>
+      <div class="stat-label" id="profit-period-label">Profit — today</div>
+    </div>
+    ` : ''}
+
     <h2>Quick actions</h2>
     <div class="action-grid">
       <button class="action-tile primary" onclick="location.hash='#/clients'"><span class="ic">👥</span>View clients</button>
@@ -256,6 +274,24 @@ async function renderDashboard() {
 
   `;
   document.getElementById('manage-templates-btn').addEventListener('click', () => openTemplateManagerModal());
+
+  if (isOwner() && data.profit_periods) {
+    const periods = data.profit_periods;
+    const labels = {
+      today: 'Profit — today',
+      this_week: 'Profit — this week',
+      this_month: 'Profit — this month',
+      this_year: 'Profit — this year',
+    };
+    document.querySelectorAll('#profit-period button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#profit-period button').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('profit-period-value').textContent = money(periods[btn.dataset.period]);
+        document.getElementById('profit-period-label').textContent = labels[btn.dataset.period];
+      });
+    });
+  }
 }
 
 // Revenue, margin, and everything money-detailed — moved off Overview so
