@@ -297,6 +297,10 @@ const api = {
     return rawFetch('POST', '/api/clients/import', { contacts });
   },
 
+  async duplicateCheck() {
+    return get('/api/clients/duplicate-check');
+  },
+
   async dashboardSummary() {
     try {
       const data = await get('/api/dashboard/summary');

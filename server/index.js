@@ -327,6 +327,42 @@ app.get('/api/clients', async (req, res) => {
   ok(res, rows.map((c) => ({ ...c, balance: byClient[Number(c.id)] || null })));
 });
 
+// Scans the whole (non-archived) client list for likely duplicates — not
+// just right after an import, any time. Two signals, both reported for a
+// human to review rather than acted on automatically:
+//   - the exact same name (after trimming/collapsing spaces, case-insensitive)
+//     appearing on more than one client record — almost always a real dupe.
+//   - the same phone number on more than one client record with DIFFERENT
+//     names — could be a genuine duplicate (typo, nickname) or a household
+//     sharing one phone, so this is flagged, never merged automatically.
+app.get('/api/clients/duplicate-check', requireOwner, async (req, res) => {
+  const rows = (await db.execute('SELECT id, name, phone FROM clients WHERE archived = 0')).rows;
+  const clients = rows.map((c) => ({ id: Number(c.id), name: c.name, phone: c.phone }));
+
+  const byName = new Map();
+  for (const c of clients) {
+    const key = c.name.trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(c);
+  }
+  const same_name = [...byName.values()]
+    .filter((group) => group.length > 1)
+    .map((group) => ({ name: group[0].name, clients: group.map((c) => ({ id: c.id, phone: c.phone })) }));
+
+  const byPhone = new Map();
+  for (const c of clients) {
+    const key = phoneMatchKey(c.phone);
+    if (!key) continue;
+    if (!byPhone.has(key)) byPhone.set(key, []);
+    byPhone.get(key).push(c);
+  }
+  const same_phone_different_name = [...byPhone.values()]
+    .filter((group) => group.length > 1 && new Set(group.map((c) => c.name.trim().toLowerCase())).size > 1)
+    .map((group) => ({ phone: group[0].phone, clients: group.map((c) => ({ id: c.id, name: c.name })) }));
+
+  ok(res, { total_clients: clients.length, same_name, same_phone_different_name });
+});
+
 app.get('/api/clients/:id', async (req, res) => {
   const client = (await db.execute({ sql: 'SELECT * FROM clients WHERE id=?', args: [req.params.id] })).rows[0];
   if (!client) return bad(res, 'Client not found', 404);

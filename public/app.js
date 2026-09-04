@@ -240,7 +240,7 @@ async function renderDashboard() {
     ${fromCache ? `<div class="sync-banner">Showing last saved data — you're offline.</div>` : ''}
     <div class="grid-2">
       <div class="card"><div class="stat">${data.appointments_today}</div><div class="stat-label">Appointments today</div></div>
-      <div class="card"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
+      <div class="card" style="cursor:pointer" onclick="location.hash='#/clients'"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
       <div class="card"><div class="stat" style="color:var(--unpaid)">${money(data.unpaid_total)}</div><div class="stat-label">Unpaid balance (${data.unpaid_entries} entries)</div></div>
       <div class="card"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits</div></div>
     </div>
@@ -502,6 +502,7 @@ function paintClientsList(data, fromCache) {
   const rows = data.filter((c) => !c.archived);
   viewEl.innerHTML = `
     <h1>Clients</h1>
+    <div class="sub" style="margin-bottom:10px">${rows.length} client${rows.length === 1 ? '' : 's'}${data.length !== rows.length ? ` (${data.length - rows.length} archived)` : ''}</div>
     ${fromCache ? `<div class="sync-banner">Showing saved data — you're offline.</div>` : ''}
     <input class="search" id="client-search" placeholder="Search clients…" autocomplete="off" autocapitalize="off" spellcheck="false" />
     <div class="segmented" id="client-sort">
@@ -1796,7 +1797,8 @@ async function renderSettings() {
     <h2>Import clients</h2>
     <div class="card">
       <div class="sub" style="margin-bottom:12px;line-height:1.45">Bring in a CSV of contacts — fills in phone numbers for clients already here and adds anyone new.</div>
-      <button class="btn secondary block" id="set-import-clients">Import from a file</button>
+      <button class="btn secondary block" id="set-import-clients" style="margin-bottom:8px">Import from a file</button>
+      <button class="btn secondary block" id="set-check-duplicates">Check for duplicate clients</button>
     </div>
 
     <h2>Activity</h2>
@@ -1820,6 +1822,7 @@ async function renderSettings() {
 
   document.getElementById('set-accounting').addEventListener('click', () => { location.hash = '#/accounting'; });
   document.getElementById('set-import-clients').addEventListener('click', openImportClientsModal);
+  document.getElementById('set-check-duplicates').addEventListener('click', openDuplicateCheckModal);
   document.getElementById('set-activity').addEventListener('click', openActivityModal);
   document.getElementById('set-add-staff').addEventListener('click', openAddStaffModal);
   document.querySelectorAll('[data-manage]').forEach((btn) => {
@@ -2046,6 +2049,51 @@ function openImportClientsModal() {
       <div class="btn-row" style="margin-top:10px"><button class="btn block" id="ic-done">Done</button></div>
     `);
     document.getElementById('ic-done').addEventListener('click', () => { closeModal(); renderSettings(); });
+  });
+}
+
+function openDuplicateCheckModal() {
+  openModal(`<h3>Duplicate check</h3><div class="empty">Checking…</div>`);
+  api.duplicateCheck().then((result) => {
+    const clientLink = (id, label) =>
+      `<button class="btn secondary" style="padding:6px 10px;font-size:0.78rem" onclick="closeModal();location.hash='#/clients/${id}'">${esc(label)}</button>`;
+
+    const nameGroups = (result.same_name || []).map((g) => `
+      <div class="session-row" style="align-items:flex-start">
+        <div>
+          <div>${esc(g.name)}</div>
+          <div class="sub">${g.clients.length} client records with this exact name</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          ${g.clients.map((c) => clientLink(c.id, c.phone || 'no phone')).join('')}
+        </div>
+      </div>`).join('');
+
+    const phoneGroups = (result.same_phone_different_name || []).map((g) => `
+      <div class="session-row" style="align-items:flex-start">
+        <div>
+          <div>${esc(g.phone)}</div>
+          <div class="sub">Same phone number, different names</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          ${g.clients.map((c) => clientLink(c.id, c.name)).join('')}
+        </div>
+      </div>`).join('');
+
+    const nothingFound = !nameGroups && !phoneGroups;
+
+    openModal(`
+      <h3>Duplicate check</h3>
+      <div class="sub" style="margin-bottom:12px">${result.total_clients} client${result.total_clients === 1 ? '' : 's'} total.</div>
+      ${nothingFound ? `<div class="empty">No likely duplicates found.</div>` : ''}
+      ${nameGroups ? `<h2>Same name, more than once</h2><div class="sub" style="margin-bottom:8px;line-height:1.45">Almost always the same person entered twice — open each one and delete or merge the extra.</div><div class="card">${nameGroups}</div>` : ''}
+      ${phoneGroups ? `<h2>Same phone, different names</h2><div class="sub" style="margin-bottom:8px;line-height:1.45">Could be a real duplicate (typo or nickname), or a household sharing one phone — worth a quick look.</div><div class="card">${phoneGroups}</div>` : ''}
+      <div class="btn-row" style="margin-top:10px"><button class="btn block" id="dc-close">Close</button></div>
+    `);
+    document.getElementById('dc-close').addEventListener('click', closeModal);
+  }).catch((err) => {
+    openModal(`<h3>Duplicate check</h3><div class="empty">${esc(err.message)}</div><div class="btn-row" style="margin-top:10px"><button class="btn block" id="dc-close">Close</button></div>`);
+    document.getElementById('dc-close').addEventListener('click', closeModal);
   });
 }
 
