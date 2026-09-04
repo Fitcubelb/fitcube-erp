@@ -707,6 +707,12 @@ function openAddClientModal(prefill = {}) {
     <input id="f-goal" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
     <label>Preferred music (optional)</label>
     <input id="f-music" placeholder="Paste a Spotify / Anghami / SoundCloud / YouTube link" autocomplete="off" />
+    <label>Tier</label>
+    <select id="f-tier">
+      <option value="Regular" selected>Regular</option>
+      <option value="Bronze">Bronze</option>
+      <option value="VIP">VIP</option>
+    </select>
     <div class="btn-row"><button class="btn block" id="f-save">Save client</button></div>
   `);
   wireContactPicker('pick-contact-btn', 'f-phone', 'f-name');
@@ -717,7 +723,8 @@ function openAddClientModal(prefill = {}) {
     const notes = document.getElementById('f-notes').value.trim();
     const musicLink = document.getElementById('f-music').value.trim();
     const goal = document.getElementById('f-goal').value.trim();
-    await api.createClient({ name, phone: phone || null, notes: notes || null, music_link: musicLink || null, goal: goal || null });
+    const tier = document.getElementById('f-tier').value;
+    await api.createClient({ name, phone: phone || null, notes: notes || null, music_link: musicLink || null, goal: goal || null, tier });
     closeModal();
     renderClientsList();
   });
@@ -742,7 +749,7 @@ async function renderClientDetail(id) {
   viewEl.innerHTML = `
     <button class="btn secondary" onclick="location.hash='#/clients'" style="margin-bottom:10px">← Clients</button>
     ${fromCache ? `<div class="sync-banner">Showing saved data — you're offline.</div>` : ''}
-    <h1>${esc(c.name)}</h1>
+    <h1>${esc(c.name)} <span class="tier-tag">${esc(c.tier || 'Regular')}</span></h1>
     <div class="card">
       <div class="sub" style="margin-bottom:6px">${esc(c.phone || 'No phone on file')}</div>
       ${c.notes ? `<div class="sub">${esc(c.notes)}</div>` : ''}
@@ -919,6 +926,12 @@ function openEditClientModal(c) {
     <input id="f-goal" value="${esc(c.goal || '')}" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
     <label>Preferred music</label>
     <input id="f-music" value="${esc(c.music_link || '')}" placeholder="Paste a Spotify / Anghami / SoundCloud / YouTube link" autocomplete="off" />
+    <label>Tier</label>
+    <select id="f-tier">
+      <option value="Regular" ${(c.tier || 'Regular') === 'Regular' ? 'selected' : ''}>Regular</option>
+      <option value="Bronze" ${c.tier === 'Bronze' ? 'selected' : ''}>Bronze</option>
+      <option value="VIP" ${c.tier === 'VIP' ? 'selected' : ''}>VIP</option>
+    </select>
     <div class="btn-row">
       <button class="btn block" id="f-save">Save</button>
       <button class="btn danger" id="f-archive">Archive client</button>
@@ -936,6 +949,7 @@ function openEditClientModal(c) {
       notes: document.getElementById('f-notes').value.trim(),
       goal: document.getElementById('f-goal').value.trim(),
       music_link: document.getElementById('f-music').value.trim(),
+      tier: document.getElementById('f-tier').value,
     });
     closeModal();
     renderClientDetail(c.id);
@@ -1896,6 +1910,8 @@ let _checkinsSearchBy = 'name';   // 'name' | 'receipt'
 let _checkinsSortBy = 'date';     // 'date' | 'sales' | 'name'
 let _checkinsDrillKey = null;     // set once you tap into a specific day/month/year card
 
+const SLIDERS_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2.4" fill="currentColor" stroke="none"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="15" cy="17" r="2.4" fill="currentColor" stroke="none"/></svg>`;
+
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function checkinDate(c) {
@@ -1952,14 +1968,14 @@ function paintCheckins(fromCache) {
   viewEl.innerHTML = `
     <h1>Checkins</h1>
     ${fromCache ? `<div class="sync-banner">Showing saved data — you're offline.</div>` : ''}
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
-      <input class="search" id="checkins-search" placeholder="Find sales…" autocomplete="off" autocapitalize="off" spellcheck="false" style="flex:1;margin-bottom:0" />
-      <button class="btn secondary" id="checkins-filter-btn" style="padding:0 14px;align-self:stretch" title="Filter">⚙</button>
+    <div class="checkins-searchbar">
+      <input class="search" id="checkins-search" placeholder="Find sales…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <button class="checkins-filter-btn" id="checkins-filter-btn" title="Filter">${SLIDERS_ICON}</button>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
-      <div class="card" style="text-align:center;padding:12px 6px"><div class="stat">${totalCheckins.toLocaleString()}</div><div class="stat-label">Checkins</div></div>
-      <div class="card" style="text-align:center;padding:12px 6px"><div class="stat">${money(totalSales)}</div><div class="stat-label">Sales</div></div>
-      <div class="card" style="text-align:center;padding:12px 6px"><div class="stat">${totalClients.toLocaleString()}</div><div class="stat-label">Clients</div></div>
+    <div class="checkins-stats">
+      <div><div class="checkins-stat-num">${totalCheckins.toLocaleString()}</div><div class="checkins-stat-label">Checkins</div></div>
+      <div><div class="checkins-stat-num">${checkinsTotalNum(totalSales)}</div><div class="checkins-stat-label">Sales</div></div>
+      <div><div class="checkins-stat-num">${totalClients.toLocaleString()}</div><div class="checkins-stat-label">Clients</div></div>
     </div>
     <div id="checkins-body"></div>
   `;
@@ -2025,13 +2041,22 @@ function paintCheckinsBody(query) {
   }
 }
 
+function checkinsAmountUSD(n) {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USD';
+}
+function checkinsTotalNum(n) {
+  return Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function checkinGroupCardHtml(g) {
   return `
     <div class="checkin-group-card" data-drill="${esc(g.key)}">
-      <div class="checkin-group-label">${esc(g.label)} <span class="checkin-group-arrow">⌄</span></div>
+      <div class="checkin-group-arrow">↓</div>
+      <div class="checkin-group-label">${esc(g.label)}</div>
       <div class="checkin-group-stats">
         <div><div class="checkin-group-stat">${g.checkins}</div><div class="checkin-group-stat-label">Checkins</div></div>
-        <div><div class="checkin-group-stat">${money(g.sales)}</div><div class="checkin-group-stat-label">Sales</div></div>
+        <div><div class="checkin-group-stat">${checkinsTotalNum(g.sales)}</div><div class="checkin-group-stat-label">Sales</div></div>
         <div><div class="checkin-group-stat">${g.clients}</div><div class="checkin-group-stat-label">Clients</div></div>
       </div>
     </div>`;
@@ -2039,11 +2064,9 @@ function checkinGroupCardHtml(g) {
 
 function checkinRowHtml(c) {
   const d = checkinDateParts(c);
-  const badge = c.payment_state === 'unpaid'
-    ? `<span class="badge unpaid">unpaid</span>`
-    : c.payment_state === 'prepaid'
-      ? `<span class="badge credit">used a credit</span>`
-      : `<span class="badge neutral">paid</span>`;
+  // Amount stays in its screenshot-format spot, just tinted to still surface
+  // payment status without adding a new element to the layout.
+  const amountColor = c.payment_state === 'unpaid' ? 'var(--unpaid)' : c.payment_state === 'prepaid' ? 'var(--credit)' : 'var(--text)';
   return `
     <div class="checkin-row">
       <div class="checkin-date-block">
@@ -2051,14 +2074,13 @@ function checkinRowHtml(c) {
         <div class="checkin-month">${d.month}</div>
       </div>
       <div class="checkin-main">
-        <div class="checkin-top">
-          <div class="checkin-name">${esc(c.client_name)} ${badge}</div>
-          <div class="checkin-time">${esc(d.weekday)}<br>${esc(d.time)}</div>
-        </div>
-        <div class="checkin-sub">By Fit Cube${c.service_name ? ' · ' + esc(c.service_name) : ''}</div>
-        <div class="checkin-bottom">
+        <div class="checkin-name">${esc(c.client_name)} <span class="checkin-tier">${esc(c.client_tier || 'Regular')}</span></div>
+        <div class="checkin-sub">By Fit Cube</div>
+        <div class="checkin-grid">
+          <div><div class="checkin-label">Day</div><div class="checkin-value">${esc(d.weekday)}</div></div>
+          <div style="text-align:right"><div class="checkin-label">Time</div><div class="checkin-value">${esc(d.time)}</div></div>
           <div><div class="checkin-label">Receipt Number</div><div class="checkin-value">${c.receipt_number || '—'}</div></div>
-          <div><div class="checkin-label">Amount</div><div class="checkin-value">${c.amount !== null ? money(c.amount) : '—'}</div></div>
+          <div style="text-align:right"><div class="checkin-label">Amount</div><div class="checkin-value" style="color:${amountColor}">${checkinsAmountUSD(c.amount)}</div></div>
         </div>
       </div>
     </div>`;
@@ -2066,26 +2088,27 @@ function checkinRowHtml(c) {
 
 function openCheckinsFilterModal() {
   openModal(`
-    <h3>Filter checkins</h3>
-    <label>Filter by date</label>
-    <div class="segmented" id="ck-filter-date">
-      <button data-mode="logs" class="${_checkinsFilterMode === 'logs' ? 'active' : ''}">Logs</button>
-      <button data-mode="day" class="${_checkinsFilterMode === 'day' ? 'active' : ''}">Day</button>
-      <button data-mode="month" class="${_checkinsFilterMode === 'month' ? 'active' : ''}">Month</button>
-      <button data-mode="year" class="${_checkinsFilterMode === 'year' ? 'active' : ''}">Year</button>
+    <div class="checkins-filter-sheet">
+      <div class="checkins-filter-done-row"><button id="ck-done">Done</button></div>
+      <label>Filter by date</label>
+      <div class="segmented" id="ck-filter-date">
+        <button data-mode="logs" class="${_checkinsFilterMode === 'logs' ? 'active' : ''}">Logs</button>
+        <button data-mode="day" class="${_checkinsFilterMode === 'day' ? 'active' : ''}">Day</button>
+        <button data-mode="month" class="${_checkinsFilterMode === 'month' ? 'active' : ''}">Month</button>
+        <button data-mode="year" class="${_checkinsFilterMode === 'year' ? 'active' : ''}">Year</button>
+      </div>
+      <label style="margin-top:14px">Search by</label>
+      <div class="segmented" id="ck-search-by">
+        <button data-mode="name" class="${_checkinsSearchBy === 'name' ? 'active' : ''}">Name</button>
+        <button data-mode="receipt" class="${_checkinsSearchBy === 'receipt' ? 'active' : ''}">Receipt Number</button>
+      </div>
+      <label style="margin-top:14px">Sort by</label>
+      <div class="segmented" id="ck-sort-by">
+        <button data-mode="date" class="${_checkinsSortBy === 'date' ? 'active' : ''}">Date</button>
+        <button data-mode="sales" class="${_checkinsSortBy === 'sales' ? 'active' : ''}">Sales</button>
+        <button data-mode="name" class="${_checkinsSortBy === 'name' ? 'active' : ''}">Name</button>
+      </div>
     </div>
-    <label style="margin-top:14px">Search by</label>
-    <div class="segmented" id="ck-search-by">
-      <button data-mode="name" class="${_checkinsSearchBy === 'name' ? 'active' : ''}">Name</button>
-      <button data-mode="receipt" class="${_checkinsSearchBy === 'receipt' ? 'active' : ''}">Receipt Number</button>
-    </div>
-    <label style="margin-top:14px">Sort by</label>
-    <div class="segmented" id="ck-sort-by">
-      <button data-mode="date" class="${_checkinsSortBy === 'date' ? 'active' : ''}">Date</button>
-      <button data-mode="sales" class="${_checkinsSortBy === 'sales' ? 'active' : ''}">Sales</button>
-      <button data-mode="name" class="${_checkinsSortBy === 'name' ? 'active' : ''}">Name</button>
-    </div>
-    <div class="btn-row" style="margin-top:16px"><button class="btn block" id="ck-done">Done</button></div>
   `);
   const currentQuery = () => (document.getElementById('checkins-search') || {}).value?.trim().toLowerCase() || '';
   const wireGroup = (id, apply) => {

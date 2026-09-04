@@ -415,18 +415,26 @@ app.get('/api/clients/:id', async (req, res) => {
   ok(res, { ...client, sessions, appointments, photos, metrics, packages });
 });
 
+const CLIENT_TIERS = ['Bronze', 'VIP', 'Regular'];
+
 app.post('/api/clients', async (req, res) => {
-  const { name, phone, notes, music_link, goal } = req.body || {};
+  const { name, phone, notes, music_link, goal, tier } = req.body || {};
   if (!name || !name.trim()) return bad(res, 'name is required');
+  if (tier !== undefined && tier !== null && tier !== '' && !CLIENT_TIERS.includes(tier)) {
+    return bad(res, 'tier must be Bronze, VIP or Regular');
+  }
   const r = await db.execute({
-    sql: 'INSERT INTO clients (name, phone, notes, music_link, goal) VALUES (?, ?, ?, ?, ?)',
-    args: [name.trim(), phone || null, notes || null, music_link || null, goal || null],
+    sql: 'INSERT INTO clients (name, phone, notes, music_link, goal, tier) VALUES (?, ?, ?, ?, ?, ?)',
+    args: [name.trim(), phone || null, notes || null, music_link || null, goal || null, tier || 'Regular'],
   });
   ok(res, { id: Number(r.lastInsertRowid) });
 });
 
 app.put('/api/clients/:id', async (req, res) => {
-  const { name, phone, notes, archived, music_link, goal } = req.body || {};
+  const { name, phone, notes, archived, music_link, goal, tier } = req.body || {};
+  if (tier !== undefined && tier !== null && tier !== '' && !CLIENT_TIERS.includes(tier)) {
+    return bad(res, 'tier must be Bronze, VIP or Regular');
+  }
   await db.execute({
     sql: `UPDATE clients SET
             name = COALESCE(?, name),
@@ -434,10 +442,11 @@ app.put('/api/clients/:id', async (req, res) => {
             notes = COALESCE(?, notes),
             music_link = COALESCE(?, music_link),
             goal = COALESCE(?, goal),
+            tier = COALESCE(?, tier),
             archived = COALESCE(?, archived),
             updated_at = datetime('now')
           WHERE id=?`,
-    args: [name ?? null, phone ?? null, notes ?? null, music_link ?? null, goal ?? null, archived === undefined ? null : archived ? 1 : 0, req.params.id],
+    args: [name ?? null, phone ?? null, notes ?? null, music_link ?? null, goal ?? null, tier || null, archived === undefined ? null : archived ? 1 : 0, req.params.id],
   });
   ok(res, { ok: true });
 });
@@ -890,7 +899,7 @@ app.post('/api/clients/:id/redeem-credit', async (req, res) => {
 app.get('/api/checkins', async (req, res) => {
   const rows = (
     await db.execute(`
-      SELECT se.id, se.client_id, c.name as client_name, se.service_id, sv.name as service_name,
+      SELECT se.id, se.client_id, c.name as client_name, c.tier as client_tier, se.service_id, sv.name as service_name,
              se.session_date, se.created_at, se.payment_state, se.amount, se.receipt_number, se.note
       FROM session_entries se
       JOIN clients c ON c.id = se.client_id

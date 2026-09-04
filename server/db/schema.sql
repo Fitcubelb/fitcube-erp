@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS clients (
   notes TEXT,
   music_link TEXT,                   -- pasted Spotify/Anghami/SoundCloud/YouTube playlist link
   goal TEXT,                         -- free-text training goal, e.g. "Lose 5kg by December"
+  tier TEXT NOT NULL DEFAULT 'Regular', -- loyalty/status tier shown on Checkins: 'Bronze' | 'VIP' | 'Regular'
   archived INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
