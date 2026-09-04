@@ -200,6 +200,7 @@ async function renderDashboard() {
       <div class="card"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
+    ${backupNudgeHtml()}
 
     <h2>Profit &amp; loss</h2>
     <div class="card">
@@ -224,15 +225,17 @@ async function renderDashboard() {
 
     <h2>Data &amp; backup</h2>
     <div class="card">
-      <div class="sub" style="margin-bottom:10px">Your data is worth protecting on its own — don't rely only on the server. Download a copy after sessions, and save it to Drive, email, or AirDrop.</div>
+      <div class="sub" style="margin-bottom:10px">${backupStatusLine()}</div>
       <div class="btn-row">
-        <a class="btn block" href="/api/backup/export" style="text-decoration:none">Download backup</a>
+        <button class="btn block" id="save-backup-btn">Save backup</button>
         <button class="btn secondary block" id="restore-backup-btn">Restore from backup</button>
       </div>
+      <div class="sub" style="margin-top:10px;line-height:1.45">"Save backup" opens your phone's share sheet — choose <b>Save to Files</b> to keep a copy on the phone itself, or <b>Google Drive</b> to put it in your Drive. Doing both takes about ten seconds.</div>
       <input type="file" id="restore-file-input" accept="application/json" style="display:none" />
     </div>
   `;
   document.getElementById('manage-templates-btn').addEventListener('click', () => openTemplateManagerModal());
+  document.getElementById('save-backup-btn').addEventListener('click', (e) => prepareBackup(e.currentTarget));
   document.getElementById('restore-backup-btn').addEventListener('click', () => {
     document.getElementById('restore-file-input').click();
   });
@@ -255,6 +258,123 @@ async function renderDashboard() {
     } catch (err) {
       alert('Restore failed: ' + err.message + '\n\nMake sure you selected a Fit Cube backup .json file, and that you have an internet connection (restore only works online).');
     }
+  });
+}
+
+// ---------- backups ----------
+
+// A backup is only useful if it actually leaves the server, so the app keeps
+// track of when one was last saved and nags when it's been too long.
+const BACKUP_STALE_DAYS = 7;
+const LAST_BACKUP_KEY = 'fitcube:lastBackup';
+
+function lastBackupAt() {
+  try {
+    const raw = localStorage.getItem(LAST_BACKUP_KEY);
+    return raw ? new Date(raw) : null;
+  } catch (err) {
+    return null;
+  }
+}
+function markBackupSaved() {
+  try {
+    localStorage.setItem(LAST_BACKUP_KEY, new Date().toISOString());
+  } catch (err) {
+    // private mode / storage disabled — the backup still saved, just untracked
+  }
+}
+function daysSinceBackup() {
+  const at = lastBackupAt();
+  if (!at || isNaN(at.getTime())) return null;
+  return Math.floor((Date.now() - at.getTime()) / 86400000);
+}
+function backupStatusLine() {
+  const days = daysSinceBackup();
+  if (days === null) return 'No backup saved from this phone yet — save one now so you have your own copy.';
+  if (days === 0) return 'Last backup: today.';
+  if (days === 1) return 'Last backup: yesterday.';
+  return `Last backup: ${days} days ago.`;
+}
+function backupNudgeHtml() {
+  const days = daysSinceBackup();
+  if (days !== null && days < BACKUP_STALE_DAYS) return '';
+  const msg = days === null
+    ? 'No backup saved yet — scroll down to Data &amp; backup and save one to your phone and Drive.'
+    : `It's been ${days} days since your last backup — scroll down to Data &amp; backup and save a fresh one.`;
+  return `<div class="card" style="border-color:var(--unpaid)">⚠ ${msg}</div>`;
+}
+
+let pendingBackup = null;
+
+async function prepareBackup(btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Preparing…';
+  try {
+    const res = await fetch('/api/backup/export', { cache: 'no-store' });
+    if (!res.ok) throw new Error('the server returned ' + res.status);
+    const text = await res.text();
+    const dump = JSON.parse(text);
+    const summary = Object.keys(dump)
+      .filter((k) => Array.isArray(dump[k]) && dump[k].length)
+      .map((k) => `${dump[k].length} ${k.replace(/_/g, ' ')}`)
+      .join(' · ');
+    const filename = `fitcube-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const blob = new Blob([text], { type: 'application/json' });
+    pendingBackup = { blob, filename };
+    openBackupSaveModal(summary, Math.max(1, Math.round(blob.size / 1024)));
+  } catch (err) {
+    alert('Couldn\'t prepare the backup: ' + err.message + '\n\nYou need to be online to make a backup.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+// The share sheet has to be opened by its own tap — iOS refuses it if the tap
+// that started things has already been spent waiting on a network request.
+// Hence the two steps: prepare the file, then offer it in this sheet.
+function openBackupSaveModal(summary, sizeKb) {
+  const canShareFiles = !!(navigator.canShare && pendingBackup &&
+    navigator.canShare({ files: [new File([pendingBackup.blob], pendingBackup.filename, { type: 'application/json' })] }));
+  openModal(`
+    <h3>Backup ready</h3>
+    <div class="sub" style="margin-bottom:4px">${esc(pendingBackup.filename)} · ${sizeKb} KB</div>
+    ${summary ? `<div class="sub" style="margin-bottom:12px;line-height:1.45">${esc(summary)}</div>` : ''}
+    ${canShareFiles ? `
+      <button class="btn block" id="backup-share-btn">Save to Files or Google Drive</button>
+      <div class="sub" style="margin:8px 0 14px;line-height:1.45">Pick <b>Save to Files</b> for a copy on this phone, or <b>Drive</b> to upload it. You can tap this button twice to do both.</div>
+    ` : ''}
+    <button class="btn ${canShareFiles ? 'secondary ' : ''}block" id="backup-download-btn">Download the file</button>
+  `);
+  const shareBtn = document.getElementById('backup-share-btn');
+  if (shareBtn) {
+    shareBtn.addEventListener('click', async () => {
+      if (!pendingBackup) return;
+      const file = new File([pendingBackup.blob], pendingBackup.filename, { type: 'application/json' });
+      try {
+        await navigator.share({ files: [file], title: 'Fit Cube backup' });
+        markBackupSaved();
+      } catch (err) {
+        // AbortError just means the share sheet was dismissed — not a failure.
+        if (err && err.name !== 'AbortError') {
+          alert('Sharing failed: ' + err.message + '\n\nUse "Download the file" instead.');
+        }
+      }
+    });
+  }
+  document.getElementById('backup-download-btn').addEventListener('click', () => {
+    if (!pendingBackup) return;
+    const url = URL.createObjectURL(pendingBackup.blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = pendingBackup.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    markBackupSaved();
+    closeModal();
   });
 }
 

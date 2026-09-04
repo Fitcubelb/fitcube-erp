@@ -60,8 +60,9 @@ Because this is an installable offline-capable app, your phone keeps a cached co
 
 No hosting setup is 100% bulletproof, so this app gives you a backup you fully control on top of everything else:
 
-- **Download backup** (Overview tab) saves a complete snapshot as a `.json` file. Do this after busy days, and save the file somewhere safe — email it to yourself, save to Google Drive/iCloud, or AirDrop it to another device. Takes 5 seconds.
-- **Restore from backup** (also on Overview) loads a backup file back in — useful if a device is lost, or if you want to move the app to different hosting later. It replaces everything currently in the database, so it asks you to confirm first.
+- **Save backup** (Overview tab) makes a complete snapshot of everything — clients, sessions, balances, photos, metrics, products, sales — and opens your phone's share sheet with it. From there, **Save to Files** puts a copy on the phone itself and **Google Drive** uploads it to your Drive; tap the button twice to do both. On a computer it just downloads the file instead. Takes about ten seconds.
+- **It reminds you.** The app remembers when you last saved a backup and shows the date on the Overview tab. If it's been more than a week, a warning appears at the top of Overview until you save a fresh one — so this doesn't quietly stop happening.
+- **Restore from backup** (also on Overview) loads a backup file back in — useful if a device is lost, or if you want to move the app to different hosting later. The file picker can reach anywhere your phone can, including Files and Google Drive, so a backup you saved to Drive can be restored straight from Drive. It replaces everything currently in the database, so it asks you to confirm first.
 - If you deploy to Turso (below), that service also keeps its own rolling backup automatically (1 day of point-in-time restore on the free tier) — a second safety net on top of your own downloaded copies.
 - The offline copy on your phone (in the app itself) is a working cache, not a backup — it's convenience for when you have no signal, not a substitute for downloading a real backup file.
 
