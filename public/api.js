@@ -3,15 +3,56 @@
 // in the outbox (see db.js / sync.js) and replayed once the connection is
 // back — the UI updates optimistically in the meantime.
 
-async function rawFetch(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+// Every write carries a unique id. If a request is retried — or replayed from
+// the outbox after the connection dropped between the server committing and
+// the reply arriving — the server recognises the id and returns the original
+// result instead of doing the work twice. Without this, one flaky upload
+// becomes two identical progress photos.
+function newRequestId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return 'r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+// Thrown when the request never reached the server (no signal, server asleep).
+// Distinguishing this from "the server answered, and said no" is the whole
+// point: only the former should ever be queued for a retry.
+class NetworkDownError extends Error {
+  constructor(cause) {
+    super('No connection to the server.');
+    this.name = 'NetworkDownError';
+    this.cause = cause;
+  }
+}
+
+async function rawFetch(method, url, body, requestId) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (requestId) headers['X-Request-Id'] = requestId;
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: Object.keys(headers).length ? headers : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
+    });
+  } catch (err) {
+    // fetch only rejects when the request didn't complete at all.
+    throw new NetworkDownError(err);
+  }
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error(errBody.error || `HTTP ${res.status}`);
+    const err = new Error(errBody.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    // A 401 from an ordinary request means the session ended — expired,
+    // signed out on another device, or the account was removed — and the app
+    // should fall back to the lock screen. A 401 from the sign-in call itself
+    // just means the password was wrong, and must be reported as such.
+    if (res.status === 401 && !url.startsWith('/api/auth/')) {
+      window.dispatchEvent(new CustomEvent('fitcube:unauthorized'));
+    }
+    throw err;
   }
   return res.status === 204 ? null : res.json();
 }
@@ -21,16 +62,20 @@ async function get(url) {
 }
 
 async function mutate(method, url, body) {
+  const requestId = newRequestId();
   try {
-    return { data: await rawFetch(method, url, body), offline: false };
+    return { data: await rawFetch(method, url, body, requestId), offline: false };
   } catch (err) {
-    // Network failure (offline / server unreachable) -> queue for later.
-    // A real validation error from the server (4xx) also throws here, but
-    // since we're offline-first we can't tell the difference without a
-    // reachability check; we optimistically assume "offline" so nothing the
-    // user enters locally is ever silently dropped.
-    await idb.queueMutation(method, url, body);
-    return { data: null, offline: true };
+    if (err instanceof NetworkDownError) {
+      // Genuinely couldn't reach the server — keep the write and replay it
+      // later, carrying the same request id so the replay can't duplicate it.
+      await idb.queueMutation(method, url, body, requestId);
+      return { data: null, offline: true };
+    }
+    // The server answered and rejected this (validation error, not allowed,
+    // signed out). Queueing that would replay a doomed request forever, so
+    // it's surfaced to the caller instead.
+    throw err;
   }
 }
 
@@ -254,6 +299,50 @@ const api = {
       const cached = await idb.get('meta', 'dashboard_summary');
       return { data: cached ? cached.value : null, fromCache: true };
     }
+  },
+
+  // ---------- accounts ----------
+
+  // Returns null when the server can't be reached, which the app treats as
+  // "offline" rather than "signed out" — otherwise losing signal in the gym
+  // would throw up a login screen over perfectly good cached data.
+  async authStatus() {
+    try {
+      return await get('/api/auth/status');
+    } catch (err) {
+      if (err instanceof NetworkDownError) return null;
+      throw err;
+    }
+  },
+  async authSetup(payload) {
+    return rawFetch('POST', '/api/auth/setup', payload);
+  },
+  async authLogin(username, password) {
+    return rawFetch('POST', '/api/auth/login', { username, password });
+  },
+  async authLogout() {
+    return rawFetch('POST', '/api/auth/logout', {});
+  },
+  async changePassword(currentPassword, newPassword) {
+    return rawFetch('POST', '/api/auth/change-password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+  },
+  async listUsers() {
+    return get('/api/users');
+  },
+  async createUser(payload) {
+    return rawFetch('POST', '/api/users', payload);
+  },
+  async updateUser(id, payload) {
+    return rawFetch('PUT', `/api/users/${id}`, payload);
+  },
+  async deleteUser(id) {
+    return rawFetch('DELETE', `/api/users/${id}`, undefined);
+  },
+  async listActivity() {
+    return get('/api/activity');
   },
 };
 

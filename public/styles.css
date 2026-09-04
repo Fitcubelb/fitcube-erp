@@ -167,6 +167,10 @@ textarea { resize: vertical; min-height: 60px; }
 .session-row:last-child { border-bottom: none; }
 .tag-chip { font-size: 0.7rem; padding: 2px 7px; border-radius: 20px; background: var(--surface-2); color: var(--text-dim); margin-left: 6px; }
 
+/* Sign-in / first-run setup, shown instead of the app itself. */
+.auth-screen { max-width: 420px; margin: 0 auto; padding: 24px 4px 40px; }
+.auth-screen h1 { margin-bottom: 6px; }
+
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.55);
   display: flex; align-items: flex-end; justify-content: center; z-index: 30;

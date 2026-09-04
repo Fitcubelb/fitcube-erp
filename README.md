@@ -39,6 +39,20 @@ The app accepts `#/clients/new?name=…&phone=…` from anywhere, so this also w
 - **Progress metrics** — log weight, body fat %, and chest/waist/hips/arm/thigh measurements per client, dated however often you actually measure them (daily, weekly, whatever) — a "+ Log weight / measurements" button on their page. A small trend line appears automatically once there are two or more weigh-ins, so you can see the direction at a glance.
 - **Reminders with editable templates** — a "Remind" button on every client's page (next to their contact info) opens a message composer: pick a template (it auto-picks Payment reminder if they owe money, Session reminder if they've got something coming up), the message is pre-filled with their name/service/date/balance, and you can still edit it before sending. "Manage message templates" (also on the Overview tab) lets you edit the wording of the built-in templates or add your own — just use `{name}`, `{service}`, `{when}`, `{amount}` anywhere you want those filled in automatically.
 
+## Who can get in
+
+The app is locked. Opening the address without signing in shows nothing but a sign-in box — no clients, no phone numbers, no balances. That isn't just the screen hiding things: the server refuses every request for data unless it recognises your account, so knowing the link gets someone precisely nowhere.
+
+**The very first time you open it after this update, it will ask you to create your owner account.** Do that immediately — until you do, the app is unclaimed, and whoever opens it first becomes the owner. Pick a password you don't use anywhere else and don't lose it; there's no reset email to fall back on.
+
+- **Staff accounts** — the ☺ button top-right → **Staff & access** → *Add a staff account*. Staff can run the day to day: clients, sessions, schedule, stock, sales, photos, measurements, reminders. They **cannot** see revenue, profit, or the revenue-by-service report, take or restore backups, or manage accounts. That's enforced on the server, so it holds no matter what someone does in their browser.
+- **Someone leaves** — *Manage* → **Suspend**. They're signed out of every device instantly and can't sign back in. *Remove* deletes the account outright.
+- **A phone goes missing** — change your own password (☺ → Change my password). That signs out every other device you were signed in on.
+- **Who did what** — ☺ → **Recent activity** shows the last 200 changes and which account made each one.
+- Staying signed in lasts 30 days per device, so you're not typing a password before every session.
+
+Under the hood, for the record: passwords are stored as salted scrypt hashes (never the password itself), the session cookie is HttpOnly and SameSite so no script or other website can lift it, sessions live server-side so revoking one takes effect at once, sign-in attempts lock out after 8 wrong guesses, the browser is told to load nothing from outside this app, and the site asks search engines not to index it.
+
 ## WhatsApp reminders
 
 **Default, $0, works right now:** tapping "Remind" builds the message and opens WhatsApp itself (not a browser tab) with it pre-filled — you just hit send. No setup needed, and this always works as a fallback even if you set up the option below.

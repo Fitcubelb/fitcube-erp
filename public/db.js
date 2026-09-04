@@ -72,9 +72,9 @@ const idb = {
     return tx(storeName, 'readwrite', (store) => store.clear());
   },
   // Outbox: queued mutations to replay against the server once back online.
-  async queueMutation(method, url, body) {
+  async queueMutation(method, url, body, requestId) {
     return tx('outbox', 'readwrite', (store) => {
-      store.add({ method, url, body: body ?? null, createdAt: Date.now() });
+      store.add({ method, url, body: body ?? null, requestId: requestId || null, createdAt: Date.now() });
     });
   },
   async getOutbox() {

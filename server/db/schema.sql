@@ -143,3 +143,71 @@ CREATE INDEX IF NOT EXISTS idx_appointments_client ON appointments(client_id);
 CREATE INDEX IF NOT EXISTS idx_appointments_starts_at ON appointments(starts_at);
 CREATE INDEX IF NOT EXISTS idx_client_photos_client ON client_photos(client_id);
 CREATE INDEX IF NOT EXISTS idx_client_metrics_client ON client_metrics(client_id);
+
+-- ---------------------------------------------------------------------------
+-- Access control. Everything above this line is business data; everything
+-- below is about who is allowed to touch it.
+-- ---------------------------------------------------------------------------
+
+-- One row per person who can sign in. The first account is created through
+-- the app's first-run setup screen (see /api/auth/setup) and is always the
+-- 'owner'; the owner can then add 'staff' accounts, which can run the day to
+-- day but can't see the money side, take backups, or manage other accounts.
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  display_name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,        -- scrypt: salt:hash, both hex
+  role TEXT NOT NULL DEFAULT 'staff', -- 'owner' | 'staff'
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_login_at TEXT
+);
+
+-- Server-side settings that must survive a redeploy but don't belong in the
+-- repo — currently just the secret used to sign session cookies, generated
+-- once on first start.
+CREATE TABLE IF NOT EXISTS app_secrets (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Signed-in devices. Kept server-side (rather than trusting a self-contained
+-- token) so that removing a person, or signing a lost phone out, takes effect
+-- immediately instead of whenever the cookie happens to expire.
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,                -- random token id, stored hashed
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  user_agent TEXT
+);
+
+-- Who changed what. Written for every successful write, so the owner can see
+-- what happened on an account other than their own.
+CREATE TABLE IF NOT EXISTS activity_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  username TEXT,                      -- denormalised so history survives deletion
+  action TEXT NOT NULL,               -- e.g. 'POST /api/clients/12/photos'
+  summary TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Idempotency. The app sends a unique id with every write; if the same id
+-- arrives twice (a retry, or the offline outbox replaying something the
+-- server had in fact already accepted) the stored response is returned
+-- instead of doing the work a second time. This is what stops a flaky upload
+-- from producing two copies of the same progress photo.
+CREATE TABLE IF NOT EXISTS request_log (
+  request_id TEXT PRIMARY KEY,
+  status INTEGER NOT NULL,
+  response TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_log_created ON activity_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_request_log_created ON request_log(created_at);

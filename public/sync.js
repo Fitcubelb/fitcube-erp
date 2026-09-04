@@ -14,11 +14,24 @@ async function flushOutbox() {
     const items = await idb.getOutbox();
     for (const item of items.sort((a, b) => a.id - b.id)) {
       try {
+        const headers = {};
+        if (item.body !== null) headers['Content-Type'] = 'application/json';
+        // Replaying with the id the write was first given lets the server
+        // recognise anything it already accepted and skip it, instead of
+        // creating a second copy.
+        if (item.requestId) headers['X-Request-Id'] = item.requestId;
         const res = await fetch(item.url, {
           method: item.method,
-          headers: item.body !== null ? { 'Content-Type': 'application/json' } : undefined,
+          headers: Object.keys(headers).length ? headers : undefined,
           body: item.body !== null ? JSON.stringify(item.body) : undefined,
+          credentials: 'same-origin',
         });
+        if (res.status === 401) {
+          // Signed out — nothing queued can succeed until that's fixed, and
+          // retrying in a loop would be pointless. Keep the queue intact.
+          window.dispatchEvent(new CustomEvent('fitcube:unauthorized'));
+          break;
+        }
         if (!res.ok && res.status >= 500) {
           // Server-side hiccup — stop here, try again on the next flush.
           break;

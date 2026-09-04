@@ -193,15 +193,16 @@ async function renderDashboard() {
     <h1>Overview</h1>
     ${fromCache ? `<div class="sync-banner">Showing last saved data — you're offline.</div>` : ''}
     <div class="grid-2">
-      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.revenue_total)}</div><div class="stat-label">Total revenue collected</div></div>
+      ${isOwner() ? `<div class="card"><div class="stat" style="color:var(--accent)">${money(data.revenue_total)}</div><div class="stat-label">Total revenue collected</div></div>` : ''}
       <div class="card"><div class="stat" style="color:var(--unpaid)">${money(data.unpaid_total)}</div><div class="stat-label">Unpaid balance (${data.unpaid_entries} entries)</div></div>
       <div class="card"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits</div></div>
       <div class="card"><div class="stat">${data.appointments_today}</div><div class="stat-label">Appointments today</div></div>
       <div class="card"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
-    ${backupNudgeHtml()}
+    ${isOwner() ? backupNudgeHtml() : ''}
 
+    ${isOwner() ? `
     <h2>Profit &amp; loss</h2>
     <div class="card">
       <div class="grid-2" style="margin-bottom:12px">
@@ -213,6 +214,7 @@ async function renderDashboard() {
       <div class="session-row"><div>Money spent restocking</div><div>${money(data.purchases_total)}</div></div>
       <div class="session-row"><div>Current inventory value (at cost)</div><div>${money(data.inventory_value)}</div></div>
     </div>
+    ` : ''}
 
     <h2>Quick actions</h2>
     <div class="btn-row">
@@ -223,6 +225,7 @@ async function renderDashboard() {
       <button class="btn secondary block" id="manage-templates-btn">Message templates</button>
     </div>
 
+    ${isOwner() ? `
     <h2>Data &amp; backup</h2>
     <div class="card">
       <div class="sub" style="margin-bottom:10px">${backupStatusLine()}</div>
@@ -233,8 +236,10 @@ async function renderDashboard() {
       <div class="sub" style="margin-top:10px;line-height:1.45">"Save backup" opens your phone's share sheet — choose <b>Save to Files</b> to keep a copy on the phone itself, or <b>Google Drive</b> to put it in your Drive. Doing both takes about ten seconds.</div>
       <input type="file" id="restore-file-input" accept="application/json" style="display:none" />
     </div>
+    ` : ''}
   `;
   document.getElementById('manage-templates-btn').addEventListener('click', () => openTemplateManagerModal());
+  if (!isOwner()) return;
   document.getElementById('save-backup-btn').addEventListener('click', (e) => prepareBackup(e.currentTarget));
   document.getElementById('restore-backup-btn').addEventListener('click', () => {
     document.getElementById('restore-file-input').click();
@@ -840,14 +845,27 @@ function openAddPhotoModal(clientId) {
       preview.innerHTML = `<div class="sub" style="color:var(--danger)">${esc(err.message)}</div>`;
     }
   });
+  let saving = false;
   saveBtn.addEventListener('click', async () => {
-    if (!dataUrl) return;
-    await api.addClientPhoto(clientId, {
-      image_data: dataUrl,
-      caption: document.getElementById('f-photo-caption').value.trim() || null,
-    });
-    closeModal();
-    renderClientDetail(clientId);
+    // Photos are large and slow to upload, which makes an impatient second
+    // tap very easy — and that used to send the picture twice.
+    if (!dataUrl || saving) return;
+    saving = true;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      await api.addClientPhoto(clientId, {
+        image_data: dataUrl,
+        caption: document.getElementById('f-photo-caption').value.trim() || null,
+      });
+      closeModal();
+      renderClientDetail(clientId);
+    } catch (err) {
+      saving = false;
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save photo';
+      alert('Could not save the photo: ' + err.message);
+    }
   });
 }
 
@@ -1456,14 +1474,19 @@ function revenueSectionHtml(r, fromCache) {
 
 async function renderSales() {
   viewEl.innerHTML = `<h1>Sales &amp; Purchases</h1><div class="empty">Loading…</div>`;
-  const [{ data: sales }, { data: purchases }, { data: revenue, fromCache: revenueFromCache }] = await Promise.all([
-    api.listSales(), api.listPurchases(), api.revenueReport(),
+  // Revenue is owner-only, so staff accounts don't even request it.
+  const [{ data: sales }, { data: purchases }, revenueResult] = await Promise.all([
+    api.listSales(), api.listPurchases(), isOwner() ? api.revenueReport() : Promise.resolve({ data: null }),
   ]);
+  const revenue = revenueResult.data;
+  const revenueFromCache = revenueResult.fromCache;
   viewEl.innerHTML = `
     <h1>Sales &amp; Purchases</h1>
 
+    ${isOwner() ? `
     <h2>Revenue by service (all time)</h2>
     ${revenue ? revenueSectionHtml(revenue, revenueFromCache) : '<div class="empty">No revenue data yet.</div>'}
+    ` : ''}
 
     <div class="btn-row">
       <button class="btn block" id="new-sale-btn">Record sale</button>
@@ -1541,7 +1564,364 @@ async function openPurchaseModal() {
   });
 }
 
+// ---------- sign in ----------
+
+// Who's using the app right now. Kept in memory; the actual proof of identity
+// is an HttpOnly cookie the page can't read, which is the point — a script
+// that somehow got onto the page still can't lift the session out of it.
+let currentUser = null;
+
+const LOCAL_SIGNED_IN_KEY = 'fitcube:signedIn';
+
+function isOwner() {
+  return !currentUser || currentUser.role === 'owner';
+}
+
+function rememberSignedIn(user) {
+  currentUser = user;
+  try {
+    if (user) localStorage.setItem(LOCAL_SIGNED_IN_KEY, JSON.stringify(user));
+    else localStorage.removeItem(LOCAL_SIGNED_IN_KEY);
+  } catch {}
+}
+function lastKnownUser() {
+  try {
+    const raw = localStorage.getItem(LOCAL_SIGNED_IN_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function showAppChrome(show) {
+  document.querySelector('.tabbar').style.display = show ? '' : 'none';
+  document.querySelector('.topbar-right').style.display = show ? '' : 'none';
+}
+
+function authScreen(inner) {
+  closeModal();
+  showAppChrome(false);
+  viewEl.innerHTML = `<div class="auth-screen">${inner}</div>`;
+}
+
+// First run: there are no accounts yet, so whoever is here creates the owner.
+function renderSetupScreen() {
+  authScreen(`
+    <h1>Set up Fit Cube</h1>
+    <div class="sub" style="margin-bottom:16px;line-height:1.5">This is the first time this app has been opened, so nothing is protecting your data yet. Create your owner account now — until you do, anyone who finds this address can open it.</div>
+    <div class="card">
+      <form id="setup-form" autocomplete="on" onsubmit="event.preventDefault()">
+        <label>Your name</label>
+        <input id="s-name" name="name" autocomplete="name" placeholder="Anthony Zakka" />
+        <label>Username</label>
+        <input id="s-username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="anthony" />
+        <label>Password</label>
+        <input id="s-password" name="new-password" type="password" autocomplete="new-password" placeholder="At least 8 characters, with a number" />
+        <label>Repeat password</label>
+        <input id="s-password2" name="new-password" type="password" autocomplete="new-password" />
+      </form>
+      <div class="sub" id="s-error" style="color:var(--unpaid);margin-top:10px"></div>
+      <div class="btn-row"><button class="btn block" id="s-save">Create my account</button></div>
+    </div>
+    <div class="sub" style="margin-top:14px;line-height:1.5">Use a password you don't use anywhere else. There's no "forgot password" email to fall back on — if you lose it, the account can't be recovered.</div>
+  `);
+  const err = document.getElementById('s-error');
+  document.getElementById('s-save').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const password = document.getElementById('s-password').value;
+    if (password !== document.getElementById('s-password2').value) {
+      err.textContent = 'The two passwords are not the same.';
+      return;
+    }
+    btn.disabled = true;
+    err.textContent = '';
+    try {
+      const user = await api.authSetup({
+        username: document.getElementById('s-username').value.trim(),
+        display_name: document.getElementById('s-name').value.trim(),
+        password,
+      });
+      rememberSignedIn(user);
+      showAppChrome(true);
+      location.hash = '#/dashboard';
+      render();
+    } catch (e2) {
+      err.textContent = e2.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function renderLoginScreen(message) {
+  const known = lastKnownUser();
+  authScreen(`
+    <h1>Fit Cube</h1>
+    <div class="sub" style="margin-bottom:16px">${message ? esc(message) : 'Sign in to continue.'}</div>
+    <div class="card">
+      <form id="login-form" autocomplete="on" onsubmit="event.preventDefault()">
+        <label>Username</label>
+        <input id="l-username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" value="${esc(known ? known.username : '')}" />
+        <label>Password</label>
+        <input id="l-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <div class="sub" id="l-error" style="color:var(--unpaid);margin-top:10px"></div>
+      <div class="btn-row"><button class="btn block" id="l-save">Sign in</button></div>
+    </div>
+  `);
+  const err = document.getElementById('l-error');
+  const submit = async () => {
+    const btn = document.getElementById('l-save');
+    btn.disabled = true;
+    err.textContent = '';
+    try {
+      const user = await api.authLogin(
+        document.getElementById('l-username').value.trim(),
+        document.getElementById('l-password').value
+      );
+      rememberSignedIn(user);
+      showAppChrome(true);
+      render();
+      if (window.fitcubeSync) window.fitcubeSync.flushOutbox();
+    } catch (e2) {
+      err.textContent = e2.message;
+      btn.disabled = false;
+    }
+  };
+  document.getElementById('l-save').addEventListener('click', submit);
+  document.getElementById('l-password').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submit();
+  });
+}
+
+async function signOut() {
+  try {
+    await api.authLogout();
+  } catch {}
+  rememberSignedIn(null);
+  renderLoginScreen('Signed out.');
+}
+
+// A 401 from anywhere in the app means the session is gone — expired, signed
+// out on another device, or the account was removed.
+window.addEventListener('fitcube:unauthorized', () => {
+  if (currentUser === null) return; // already on the login screen
+  rememberSignedIn(null);
+  renderLoginScreen('Your session ended. Please sign in again.');
+});
+
+function openAccountModal() {
+  openModal(`
+    <h3>${esc(currentUser ? currentUser.display_name : 'Account')}</h3>
+    <div class="sub" style="margin-bottom:12px">Signed in as ${esc(currentUser ? currentUser.username : '')} · ${currentUser && currentUser.role === 'owner' ? 'Owner' : 'Staff'}</div>
+    <button class="btn secondary block" id="a-password" style="margin-bottom:8px">Change my password</button>
+    ${isOwner() ? `<button class="btn secondary block" id="a-staff" style="margin-bottom:8px">Staff &amp; access</button>
+    <button class="btn secondary block" id="a-activity" style="margin-bottom:8px">Recent activity</button>` : ''}
+    <button class="btn danger block" id="a-signout">Sign out</button>
+  `);
+  document.getElementById('a-password').addEventListener('click', openChangePasswordModal);
+  document.getElementById('a-signout').addEventListener('click', signOut);
+  const staffBtn = document.getElementById('a-staff');
+  if (staffBtn) staffBtn.addEventListener('click', openStaffModal);
+  const actBtn = document.getElementById('a-activity');
+  if (actBtn) actBtn.addEventListener('click', openActivityModal);
+}
+
+function openChangePasswordModal() {
+  openModal(`
+    <h3>Change my password</h3>
+    <form autocomplete="on" onsubmit="event.preventDefault()">
+      <label>Current password</label>
+      <input id="p-current" type="password" autocomplete="current-password" />
+      <label>New password</label>
+      <input id="p-new" type="password" autocomplete="new-password" placeholder="At least 8 characters, with a number" />
+      <label>Repeat new password</label>
+      <input id="p-new2" type="password" autocomplete="new-password" />
+    </form>
+    <div class="sub" style="margin-top:10px;line-height:1.45">This signs you out everywhere else — use it if a phone with the app on it goes missing.</div>
+    <div class="sub" id="p-error" style="color:var(--unpaid);margin-top:8px"></div>
+    <div class="btn-row"><button class="btn block" id="p-save">Change password</button></div>
+  `);
+  const err = document.getElementById('p-error');
+  document.getElementById('p-save').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const next = document.getElementById('p-new').value;
+    if (next !== document.getElementById('p-new2').value) {
+      err.textContent = 'The two new passwords are not the same.';
+      return;
+    }
+    btn.disabled = true;
+    err.textContent = '';
+    try {
+      await api.changePassword(document.getElementById('p-current').value, next);
+      closeModal();
+      alert('Password changed. Any other device signed in as you has been signed out.');
+    } catch (e2) {
+      err.textContent = e2.message;
+      btn.disabled = false;
+    }
+  });
+}
+
+async function openStaffModal() {
+  openModal(`<h3>Staff &amp; access</h3><div class="empty">Loading…</div>`);
+  let users = [];
+  try {
+    users = await api.listUsers();
+  } catch (err) {
+    openModal(`<h3>Staff &amp; access</h3><div class="empty">${esc(err.message)}</div>`);
+    return;
+  }
+  openModal(`
+    <h3>Staff &amp; access</h3>
+    <div class="sub" style="margin-bottom:12px;line-height:1.45">Staff can run sessions, clients, schedule, stock and sales. They can't see revenue or profit, take or restore backups, or manage accounts.</div>
+    ${users.map((u) => `
+      <div class="session-row">
+        <div>
+          <div>${esc(u.display_name)}${u.active ? '' : ' <span class="tag-chip">suspended</span>'}</div>
+          <div class="sub">${esc(u.username)} · ${u.role === 'owner' ? 'Owner' : 'Staff'}${u.last_login_at ? ` · last in ${fmtDate(u.last_login_at)}` : ' · never signed in'}</div>
+        </div>
+        ${u.role === 'owner' ? '' : `<button class="btn secondary" data-manage="${u.id}" style="padding:6px 10px;font-size:0.78rem">Manage</button>`}
+      </div>
+    `).join('')}
+    <div class="btn-row" style="margin-top:12px"><button class="btn block" id="u-add">Add a staff account</button></div>
+  `);
+  document.getElementById('u-add').addEventListener('click', openAddStaffModal);
+  document.querySelectorAll('[data-manage]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const u = users.find((x) => String(x.id) === btn.dataset.manage);
+      if (u) openManageStaffModal(u);
+    });
+  });
+}
+
+function openAddStaffModal() {
+  openModal(`
+    <h3>Add a staff account</h3>
+    <form autocomplete="off" onsubmit="event.preventDefault()">
+      <label>Their name</label><input id="u-name" />
+      <label>Username</label><input id="u-username" autocapitalize="off" spellcheck="false" />
+      <label>Password</label><input id="u-password" type="password" placeholder="At least 8 characters, with a number" />
+    </form>
+    <div class="sub" style="margin-top:10px;line-height:1.45">Give them this password in person and ask them to change it from their own account once they're in.</div>
+    <div class="sub" id="u-error" style="color:var(--unpaid);margin-top:8px"></div>
+    <div class="btn-row"><button class="btn block" id="u-save">Create account</button></div>
+  `);
+  const err = document.getElementById('u-error');
+  document.getElementById('u-save').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    err.textContent = '';
+    try {
+      await api.createUser({
+        display_name: document.getElementById('u-name').value.trim(),
+        username: document.getElementById('u-username').value.trim(),
+        password: document.getElementById('u-password').value,
+      });
+      openStaffModal();
+    } catch (e2) {
+      err.textContent = e2.message;
+      btn.disabled = false;
+    }
+  });
+}
+
+function openManageStaffModal(u) {
+  openModal(`
+    <h3>${esc(u.display_name)}</h3>
+    <div class="sub" style="margin-bottom:12px">${esc(u.username)} · ${u.active ? 'active' : 'suspended'} · ${u.active_devices || 0} signed-in device(s)</div>
+    <button class="btn secondary block" id="m-reset" style="margin-bottom:8px">Set a new password for them</button>
+    <button class="btn secondary block" id="m-toggle" style="margin-bottom:8px">${u.active ? 'Suspend this account' : 'Re-enable this account'}</button>
+    <button class="btn danger block" id="m-delete">Remove this account</button>
+    <div class="sub" style="margin-top:10px;line-height:1.45">Suspending signs them out of every device immediately and blocks them from signing back in — the quickest thing to do if someone leaves.</div>
+  `);
+  document.getElementById('m-reset').addEventListener('click', () => {
+    const pw = prompt('New password for ' + u.display_name + ' (at least 8 characters, with a number):');
+    if (!pw) return;
+    api.updateUser(u.id, { password: pw })
+      .then(() => { alert('Password set. They have been signed out everywhere.'); openStaffModal(); })
+      .catch((e) => alert(e.message));
+  });
+  document.getElementById('m-toggle').addEventListener('click', () => {
+    api.updateUser(u.id, { active: !u.active })
+      .then(openStaffModal)
+      .catch((e) => alert(e.message));
+  });
+  document.getElementById('m-delete').addEventListener('click', () => {
+    if (!confirm(`Remove ${u.display_name}'s account? They'll be signed out and won't be able to get back in.`)) return;
+    api.deleteUser(u.id).then(openStaffModal).catch((e) => alert(e.message));
+  });
+}
+
+async function openActivityModal() {
+  openModal(`<h3>Recent activity</h3><div class="empty">Loading…</div>`);
+  try {
+    const rows = await api.listActivity();
+    openModal(`
+      <h3>Recent activity</h3>
+      <div class="sub" style="margin-bottom:12px">The last 200 changes made from any account.</div>
+      ${rows.length ? rows.map((r) => `
+        <div class="session-row">
+          <div>
+            <div>${esc(r.summary || describeAction(r.action))}</div>
+            <div class="sub">${esc(r.username || 'unknown')} · ${fmtDate(r.created_at)}</div>
+          </div>
+        </div>
+      `).join('') : '<div class="empty">Nothing recorded yet.</div>'}
+    `);
+  } catch (err) {
+    openModal(`<h3>Recent activity</h3><div class="empty">${esc(err.message)}</div>`);
+  }
+}
+
+// Turns 'POST /api/clients/12/photos' into something readable.
+function describeAction(action) {
+  if (!action) return 'Change';
+  const [method, url] = String(action).split(' ');
+  const path = (url || '').replace(/^\/api\//, '');
+  const verb = { POST: 'Added', PUT: 'Updated', DELETE: 'Deleted', PATCH: 'Updated' }[method] || method;
+  if (/photos/.test(path)) return `${verb} a progress photo`;
+  if (/metrics/.test(path)) return `${verb} progress measurements`;
+  if (/sessions/.test(path)) return `${verb} a session`;
+  if (/appointments/.test(path)) return `${verb} an appointment`;
+  if (/^clients/.test(path)) return `${verb} a client`;
+  if (/^products/.test(path)) return `${verb} a product`;
+  if (/^sales/.test(path)) return `${verb} a sale`;
+  if (/^purchases/.test(path)) return `${verb} a purchase`;
+  if (/^services/.test(path)) return `${verb} a service`;
+  if (/^templates/.test(path)) return `${verb} a message template`;
+  return `${verb} ${path}`;
+}
+
 // ---------- boot ----------
-document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
-updateThemeToggleIcon();
-render();
+
+async function boot() {
+  document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+  updateThemeToggleIcon();
+  document.getElementById('account-btn').addEventListener('click', openAccountModal);
+
+  const status = await api.authStatus();
+
+  if (status === null) {
+    // Couldn't reach the server. If this device was signed in before, let it
+    // straight through to its cached data rather than blocking on a login it
+    // can't complete offline; the server still refuses any real request.
+    const known = lastKnownUser();
+    if (known) {
+      currentUser = known;
+      showAppChrome(true);
+      return render();
+    }
+    return renderLoginScreen('Can\'t reach the server right now. Check your connection and try again.');
+  }
+  if (!status.configured) return renderSetupScreen();
+  if (!status.authenticated) {
+    rememberSignedIn(null);
+    return renderLoginScreen();
+  }
+  rememberSignedIn(status.user);
+  showAppChrome(true);
+  render();
+}
+
+boot();
