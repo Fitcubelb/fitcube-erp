@@ -38,6 +38,29 @@
 <script src="/app.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').then((reg) => {
+        // Browsers (iOS Safari especially) only check for a new service
+        // worker occasionally by default — an installed app can otherwise
+        // show an old cached version for a long time. Force a check on
+        // every launch, and again whenever the app regains focus (e.g.
+        // reopened from the home screen), since that doesn't always count
+        // as a fresh navigation.
+        reg.update();
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') reg.update();
+        });
+      });
+    });
+    // Once a newly-installed service worker takes over, the page already
+    // in memory is still running the old code — reload once so the update
+    // actually takes effect, instead of silently waiting for a manual
+    // refresh.
+    let swRefreshed = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (swRefreshed) return;
+      swRefreshed = true;
+      window.location.reload();
+    });
   }
 </script>
