@@ -100,6 +100,43 @@ const api = {
     return mutate('DELETE', `/api/photos/${photoId}`, undefined);
   },
 
+  async addClientMetric(clientId, payload) {
+    return mutate('POST', `/api/clients/${clientId}/metrics`, payload);
+  },
+
+  async deleteMetric(metricId) {
+    return mutate('DELETE', `/api/metrics/${metricId}`, undefined);
+  },
+
+  async listTemplates() {
+    try {
+      const data = await get('/api/templates');
+      await idb.putAll('templates', data);
+      return { data, fromCache: false };
+    } catch {
+      return { data: await idb.getAll('templates'), fromCache: true };
+    }
+  },
+
+  async createTemplate(payload) {
+    const result = await mutate('POST', '/api/templates', payload);
+    const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
+    await idb.put('templates', { id, _pending: result.offline, ...payload });
+    return { id, offline: result.offline };
+  },
+
+  async updateTemplate(id, payload) {
+    const result = await mutate('PUT', `/api/templates/${id}`, payload);
+    const existing = (await idb.get('templates', id)) || { id };
+    await idb.put('templates', { ...existing, ...payload, _pending: result.offline || existing._pending });
+    return result;
+  },
+
+  async deleteTemplate(id) {
+    await idb.delete('templates', id);
+    return mutate('DELETE', `/api/templates/${id}`, undefined);
+  },
+
   async createService(payload) {
     const result = await mutate('POST', '/api/services', payload);
     const id = result.offline ? `tmp_${Date.now()}` : result.data.id;

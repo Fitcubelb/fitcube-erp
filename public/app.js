@@ -169,6 +169,9 @@ async function renderDashboard() {
       <button class="btn block" onclick="location.hash='#/clients'">View clients</button>
       <button class="btn secondary block" onclick="location.hash='#/schedule'">Schedule</button>
     </div>
+    <div class="btn-row">
+      <button class="btn secondary block" id="manage-templates-btn">Message templates</button>
+    </div>
 
     <h2>Data &amp; backup</h2>
     <div class="card">
@@ -180,6 +183,7 @@ async function renderDashboard() {
       <input type="file" id="restore-file-input" accept="application/json" style="display:none" />
     </div>
   `;
+  document.getElementById('manage-templates-btn').addEventListener('click', () => openTemplateManagerModal());
   document.getElementById('restore-backup-btn').addEventListener('click', () => {
     document.getElementById('restore-file-input').click();
   });
@@ -321,6 +325,8 @@ function openAddClientModal() {
     <label>Name</label><input id="f-name" placeholder="Full name" autocomplete="name" />
     <label>Phone</label><input id="f-phone" placeholder="70 123 456" autocomplete="tel" type="tel" />
     <label>Notes</label><textarea id="f-notes" placeholder="Optional"></textarea>
+    <label>Goal (optional)</label>
+    <input id="f-goal" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
     <label>Preferred music (optional)</label>
     <input id="f-music" placeholder="Paste a Spotify / Anghami / SoundCloud / YouTube link" autocomplete="off" />
     ${!CONTACT_PICKER_SUPPORTED ? `<div class="sub" style="margin-top:8px">Tip: tap into Name or Phone — your phone may suggest matching contacts as you type.</div>` : ''}
@@ -346,7 +352,8 @@ function openAddClientModal() {
     const phone = document.getElementById('f-phone').value.trim();
     const notes = document.getElementById('f-notes').value.trim();
     const musicLink = document.getElementById('f-music').value.trim();
-    await api.createClient({ name, phone: phone || null, notes: notes || null, music_link: musicLink || null });
+    const goal = document.getElementById('f-goal').value.trim();
+    await api.createClient({ name, phone: phone || null, notes: notes || null, music_link: musicLink || null, goal: goal || null });
     closeModal();
     renderClientsList();
   });
@@ -359,6 +366,7 @@ async function renderClientDetail(id) {
   const sessions = c.sessions || [];
   const appts = c.appointments || [];
   const photos = c.photos || [];
+  const metrics = c.metrics || [];
   const unpaidTotal = sessions.filter((s) => s.payment_state === 'unpaid').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
   const unpaidNoAmt = sessions.filter((s) => s.payment_state === 'unpaid' && s.amount === null).length;
   const credits = sessions.filter((s) => s.payment_state === 'prepaid' && s.amount === null).length;
@@ -370,9 +378,10 @@ async function renderClientDetail(id) {
     <div class="card">
       <div class="sub" style="margin-bottom:6px">${esc(c.phone || 'No phone on file')}</div>
       ${c.notes ? `<div class="sub">${esc(c.notes)}</div>` : ''}
+      ${c.goal ? `<div class="sub" style="margin-top:6px;color:var(--accent);font-weight:600">🎯 Goal: ${esc(c.goal)}</div>` : ''}
       <div class="btn-row">
         <button class="btn secondary" id="edit-client-btn">Edit contact info</button>
-        ${c.phone ? `<button class="btn secondary" id="whatsapp-btn">WhatsApp</button>` : ''}
+        ${c.phone ? `<button class="btn secondary" id="remind-btn">Remind</button>` : ''}
         ${c.music_link ? `<button class="btn secondary" id="music-btn">${musicPlatformInfo(c.music_link).icon} Play on ${musicPlatformInfo(c.music_link).label}</button>` : ''}
       </div>
     </div>
@@ -394,6 +403,13 @@ async function renderClientDetail(id) {
     </div>
     ${!photos.length ? '<div class="empty">No progress photos yet — tap + to add one.</div>' : ''}
 
+    <h2>Progress metrics</h2>
+    <div class="card">
+      ${weightSparklineSvg(metrics)}
+      ${metrics.length ? [...metrics].reverse().map((m) => metricRowHtml(m)).join('') : '<div class="empty">No progress metrics logged yet.</div>'}
+    </div>
+    <button class="btn secondary block" id="add-metric-btn" style="margin-bottom:14px">+ Log weight / measurements</button>
+
     <h2>Session history</h2>
     <div class="card">
       ${sessions.length ? sessions.map((s) => sessionRowHtml(s)).join('') : '<div class="empty">No sessions logged yet.</div>'}
@@ -412,8 +428,13 @@ async function renderClientDetail(id) {
   document.getElementById('edit-client-btn').addEventListener('click', () => openEditClientModal(c));
   document.getElementById('log-session-btn').addEventListener('click', () => openLogSessionModal(c.id));
   document.getElementById('add-appt-btn').addEventListener('click', () => openAddAppointmentModal(c.id));
-  const waBtn = document.getElementById('whatsapp-btn');
-  if (waBtn) waBtn.addEventListener('click', () => sendWhatsAppReminder(c, `Hi ${c.name}, this is Fit Cube.`));
+  const remindBtn = document.getElementById('remind-btn');
+  if (remindBtn) remindBtn.addEventListener('click', () => {
+    const nextAppt = appts
+      .filter((a) => a.status === 'scheduled' && new Date(a.starts_at) >= new Date())
+      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))[0] || null;
+    openSendReminderModal(c, unpaidTotal, nextAppt);
+  });
   const musicBtn = document.getElementById('music-btn');
   if (musicBtn) musicBtn.addEventListener('click', () => window.open(c.music_link, '_blank'));
   document.getElementById('add-photo-btn').addEventListener('click', () => openAddPhotoModal(c.id));
@@ -421,6 +442,15 @@ async function renderClientDetail(id) {
     thumb.addEventListener('click', () => {
       const p = photos.find((x) => String(x.id) === thumb.dataset.id);
       if (p) openPhotoLightbox(p, c.id);
+    });
+  });
+  document.getElementById('add-metric-btn').addEventListener('click', () => openAddMetricModal(c.id));
+  viewEl.querySelectorAll('[data-remove-metric]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Delete this metric entry?')) return;
+      await api.deleteMetric(btn.dataset.removeMetric);
+      renderClientDetail(id);
     });
   });
   viewEl.querySelectorAll('[data-remind]').forEach((btn) => {
@@ -474,6 +504,8 @@ function openEditClientModal(c) {
     <label>Name</label><input id="f-name" value="${esc(c.name)}" />
     <label>Phone</label><input id="f-phone" value="${esc(c.phone || '')}" />
     <label>Notes</label><textarea id="f-notes">${esc(c.notes || '')}</textarea>
+    <label>Goal</label>
+    <input id="f-goal" value="${esc(c.goal || '')}" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
     <label>Preferred music</label>
     <input id="f-music" value="${esc(c.music_link || '')}" placeholder="Paste a Spotify / Anghami / SoundCloud / YouTube link" autocomplete="off" />
     <div class="btn-row">
@@ -482,11 +514,17 @@ function openEditClientModal(c) {
     </div>
   `);
   document.getElementById('f-save').addEventListener('click', async () => {
+    const name = document.getElementById('f-name').value.trim();
+    if (!name) { alert('Name is required.'); return; }
+    // Sent as '' rather than null when cleared: the server's UPDATE uses
+    // COALESCE(?, column), which treats null as "leave unchanged" — so an
+    // empty string is what actually lets you clear a field here.
     await api.updateClient(c.id, {
-      name: document.getElementById('f-name').value.trim(),
-      phone: document.getElementById('f-phone').value.trim() || null,
-      notes: document.getElementById('f-notes').value.trim() || null,
-      music_link: document.getElementById('f-music').value.trim() || null,
+      name,
+      phone: document.getElementById('f-phone').value.trim(),
+      notes: document.getElementById('f-notes').value.trim(),
+      goal: document.getElementById('f-goal').value.trim(),
+      music_link: document.getElementById('f-music').value.trim(),
     });
     closeModal();
     renderClientDetail(c.id);
@@ -591,6 +629,189 @@ function openPhotoLightbox(photo, clientId) {
     await api.deletePhoto(photo.id);
     closeModal();
     renderClientDetail(clientId);
+  });
+}
+
+// ---------- progress metrics (weight, body fat, measurements) ----------
+
+function metricRowHtml(m) {
+  const parts = [];
+  if (m.weight !== null && m.weight !== undefined) parts.push(`${m.weight}kg`);
+  if (m.body_fat_pct !== null && m.body_fat_pct !== undefined) parts.push(`${m.body_fat_pct}% BF`);
+  const measurements = ['chest', 'waist', 'hips', 'arm', 'thigh']
+    .filter((k) => m[k] !== null && m[k] !== undefined)
+    .map((k) => `${k}: ${m[k]}cm`);
+  return `
+    <div class="session-row">
+      <div>
+        <div>${parts.join(' · ') || 'Measurement logged'}</div>
+        <div class="sub">${fmtDate(m.metric_date)}${measurements.length ? ' · ' + measurements.join(', ') : ''}${m.note ? ' · ' + esc(m.note) : ''}</div>
+      </div>
+      <button class="btn danger" style="padding:6px 8px;font-size:0.75rem" data-remove-metric="${m.id}">×</button>
+    </div>`;
+}
+
+function weightSparklineSvg(metrics) {
+  const pts = metrics.filter((m) => m.weight !== null && m.weight !== undefined && m.weight !== '');
+  if (pts.length < 2) return '';
+  const weights = pts.map((m) => Number(m.weight));
+  const min = Math.min(...weights), max = Math.max(...weights);
+  const range = max - min || 1;
+  const w = 300, h = 60, pad = 6;
+  const stepX = (w - pad * 2) / (pts.length - 1);
+  const coords = weights.map((wt, i) => {
+    const x = pad + i * stepX;
+    const y = h - pad - ((wt - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return `
+    <div style="margin-bottom:12px">
+      <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:60px;display:block" preserveAspectRatio="none">
+        <polyline points="${coords.join(' ')}" fill="none" style="stroke:var(--accent);stroke-width:2" />
+      </svg>
+      <div class="sub" style="display:flex;justify-content:space-between;margin-top:2px">
+        <span>${weights[0]}kg</span><span>Latest: ${weights[weights.length - 1]}kg</span>
+      </div>
+    </div>`;
+}
+
+function openAddMetricModal(clientId) {
+  openModal(`
+    <h3>Log weight / measurements</h3>
+    <label>Date</label>
+    <input id="f-date" type="date" value="${new Date().toISOString().slice(0, 10)}" />
+    <label>Weight (kg)</label><input id="f-weight" type="number" step="0.1" placeholder="e.g. 78.5" />
+    <label>Body fat %</label><input id="f-bodyfat" type="number" step="0.1" placeholder="Optional" />
+    <div class="grid-2">
+      <div><label>Chest (cm)</label><input id="f-chest" type="number" step="0.1" placeholder="Optional" /></div>
+      <div><label>Waist (cm)</label><input id="f-waist" type="number" step="0.1" placeholder="Optional" /></div>
+    </div>
+    <div class="grid-2">
+      <div><label>Hips (cm)</label><input id="f-hips" type="number" step="0.1" placeholder="Optional" /></div>
+      <div><label>Arm (cm)</label><input id="f-arm" type="number" step="0.1" placeholder="Optional" /></div>
+    </div>
+    <label>Thigh (cm)</label><input id="f-thigh" type="number" step="0.1" placeholder="Optional" />
+    <label>Note</label><input id="f-note" placeholder="Optional — how they're feeling, a PR hit, etc." />
+    <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
+  `);
+  document.getElementById('f-save').addEventListener('click', async () => {
+    const val = (id) => { const v = document.getElementById(id).value; return v === '' ? null : Number(v); };
+    const weight = val('f-weight'), bodyFat = val('f-bodyfat'), chest = val('f-chest'),
+      waist = val('f-waist'), hips = val('f-hips'), arm = val('f-arm'), thigh = val('f-thigh');
+    if ([weight, bodyFat, chest, waist, hips, arm, thigh].every((v) => v === null)) {
+      alert('Enter at least one measurement.');
+      return;
+    }
+    const dateVal = document.getElementById('f-date').value;
+    await api.addClientMetric(clientId, {
+      metric_date: dateVal ? dateVal + 'T12:00' : null,
+      weight, body_fat_pct: bodyFat, chest, waist, hips, arm, thigh,
+      note: document.getElementById('f-note').value.trim() || null,
+    });
+    closeModal();
+    renderClientDetail(clientId);
+  });
+}
+
+// ---------- reminders / message templates ----------
+
+function fillTemplate(body, vars) {
+  return body.replace(/\{(\w+)\}/g, (m, key) => (vars[key] !== undefined && vars[key] !== null ? vars[key] : m));
+}
+
+function buildReminderVars(c, unpaidTotal, nextAppt) {
+  return {
+    name: c.name,
+    amount: money(unpaidTotal),
+    service: nextAppt ? (nextAppt.service_name || 'session') : 'your next session',
+    when: nextAppt ? fmtDate(nextAppt.starts_at) : 'your next visit',
+  };
+}
+
+async function openSendReminderModal(c, unpaidTotal, nextAppt) {
+  if (!c.phone) { alert('Add a phone number for this client first.'); return; }
+  const { data: templates } = await api.listTemplates();
+  if (!templates.length) {
+    alert('No message templates yet — add one first.');
+    openTemplateManagerModal();
+    return;
+  }
+  const vars = buildReminderVars(c, unpaidTotal, nextAppt);
+  const preferred = (unpaidTotal > 0 && templates.find((t) => /payment/i.test(t.name)))
+    || (nextAppt && templates.find((t) => /session/i.test(t.name)))
+    || templates[0];
+
+  openModal(`
+    <h3>Send reminder to ${esc(c.name)}</h3>
+    <label>Template</label>
+    <select id="f-template">${templates.map((t) => `<option value="${t.id}" ${t.id === preferred.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+    <label>Message (edit freely before sending)</label>
+    <textarea id="f-message" rows="4">${esc(fillTemplate(preferred.body, vars))}</textarea>
+    <div class="sub" style="margin-top:4px">Placeholders available: {name}, {service}, {when}, {amount}</div>
+    <div class="btn-row"><button class="btn block" id="f-send">Send via WhatsApp</button></div>
+    <button type="button" class="btn secondary block" id="f-manage-templates" style="margin-top:8px">Manage message templates</button>
+  `);
+
+  document.getElementById('f-template').addEventListener('change', (e) => {
+    const t = templates.find((x) => String(x.id) === e.target.value);
+    document.getElementById('f-message').value = t ? fillTemplate(t.body, vars) : '';
+  });
+  document.getElementById('f-send').addEventListener('click', () => {
+    const msg = document.getElementById('f-message').value.trim();
+    if (!msg) return;
+    sendWhatsAppReminder(c, msg, [vars.name, vars.service, vars.when]);
+    closeModal();
+  });
+  document.getElementById('f-manage-templates').addEventListener('click', () => openTemplateManagerModal());
+}
+
+async function openTemplateManagerModal() {
+  const { data: templates } = await api.listTemplates();
+  openModal(`
+    <h3>Message templates</h3>
+    <div class="sub" style="margin-bottom:10px">Placeholders you can use in any template: {name}, {service}, {when}, {amount}.</div>
+    <div id="tmpl-rows">${templates.length ? templates.map((t) => templateRowHtml(t)).join('') : '<div class="empty">No templates yet.</div>'}</div>
+    <button type="button" class="btn secondary block" id="tmpl-new-btn" style="margin-top:10px">+ New template</button>
+  `);
+  document.querySelectorAll('[data-edit-tmpl]').forEach((btn) => btn.addEventListener('click', () => {
+    const t = templates.find((x) => String(x.id) === btn.dataset.editTmpl);
+    openEditTemplateModal(t);
+  }));
+  document.querySelectorAll('[data-del-tmpl]').forEach((btn) => btn.addEventListener('click', async () => {
+    if (!confirm('Delete this template?')) return;
+    await api.deleteTemplate(btn.dataset.delTmpl);
+    openTemplateManagerModal();
+  }));
+  document.getElementById('tmpl-new-btn').addEventListener('click', () => openEditTemplateModal(null));
+}
+
+function templateRowHtml(t) {
+  return `
+    <div class="card" data-id="${t.id}">
+      <div style="font-weight:600;margin-bottom:4px">${esc(t.name)}</div>
+      <div class="sub" style="white-space:pre-wrap">${esc(t.body)}</div>
+      <div class="btn-row">
+        <button class="btn secondary" data-edit-tmpl="${t.id}" style="padding:6px 10px;font-size:0.78rem">Edit</button>
+        <button class="btn danger" data-del-tmpl="${t.id}" style="padding:6px 10px;font-size:0.78rem">Delete</button>
+      </div>
+    </div>`;
+}
+
+function openEditTemplateModal(t) {
+  openModal(`
+    <h3>${t ? 'Edit template' : 'New template'}</h3>
+    <label>Name</label><input id="f-name" value="${t ? esc(t.name) : ''}" placeholder="e.g. Payment reminder" />
+    <label>Message</label><textarea id="f-body" rows="4" placeholder="Hi {name}, ...">${t ? esc(t.body) : ''}</textarea>
+    <div class="sub" style="margin-top:4px">Placeholders: {name}, {service}, {when}, {amount}</div>
+    <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
+  `);
+  document.getElementById('f-save').addEventListener('click', async () => {
+    const name = document.getElementById('f-name').value.trim();
+    const body = document.getElementById('f-body').value.trim();
+    if (!name || !body) return;
+    if (t) await api.updateTemplate(t.id, { name, body });
+    else await api.createTemplate({ name, body });
+    openTemplateManagerModal();
   });
 }
 

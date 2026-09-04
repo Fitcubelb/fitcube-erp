@@ -21,6 +21,9 @@ A client, session, schedule and small-inventory manager for Fit Cube (Anthony Za
 - **Progress photos** — every client page has a photo strip for before/after and progress shots. Tap + to add one (or take one on the spot with your phone's camera); photos are automatically resized and compressed in your browser before upload, so this stays fast and light. Tap any photo to see it full-size, add a caption, or delete it.
 - **Preferred music, one tap away** — paste a client's Spotify, Anghami, SoundCloud, or YouTube playlist link on their profile (when adding or editing a client), and a "Play on [App]" button appears on their page that opens it directly — handy for starting their playlist right as a session begins.
 - **Profit &amp; loss** — the Overview tab shows gross profit (all revenue minus what sold products actually cost you), a revenue breakdown, money spent restocking, and current inventory value at cost — so you can see what the business is actually making, not just what's coming in.
+- **Client goals** — a free-text goal field on every client (e.g. "Lose 5kg by December", "Fix squat form") shown right on their page, set when adding or editing a client.
+- **Progress metrics** — log weight, body fat %, and chest/waist/hips/arm/thigh measurements per client, dated however often you actually measure them (daily, weekly, whatever) — a "+ Log weight / measurements" button on their page. A small trend line appears automatically once there are two or more weigh-ins, so you can see the direction at a glance.
+- **Reminders with editable templates** — a "Remind" button on every client's page (next to their contact info) opens a message composer: pick a template (it auto-picks Payment reminder if they owe money, Session reminder if they've got something coming up), the message is pre-filled with their name/service/date/balance, and you can still edit it before sending. "Manage message templates" (also on the Overview tab) lets you edit the wording of the built-in templates or add your own — just use `{name}`, `{service}`, `{when}`, `{amount}` anywhere you want those filled in automatically.
 
 ## WhatsApp reminders
 
@@ -34,6 +37,10 @@ A client, session, schedule and small-inventory manager for Fit Cube (Anthony Za
 4. Set `WHATSAPP_ACCESS_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` (and `WHATSAPP_TEMPLATE_NAME`/`WHATSAPP_TEMPLATE_LANG` if different) as environment variables.
 
 Once those are set, "Remind" sends automatically with no app-switching at all. Leave them unset and everything still works via the free WhatsApp-app-opening method above — nothing breaks either way.
+
+## If the app looks out of date after an update
+
+Because this is an installable offline-capable app, your phone keeps a cached copy of it so it still works with no signal — that's the whole point, but it means a brand-new version sometimes takes an extra moment to show up. If you ever add a feature and don't see it: fully close the app (swipe it away, don't just background it) and reopen it once while you have signal. That's normally all it takes — the app checks for a new version in the background and swaps it in automatically the next time you open it.
 
 ## Protecting your data
 

@@ -83,31 +83,38 @@ app.get('/api/clients/:id', async (req, res) => {
       args: [req.params.id],
     })
   ).rows;
-  ok(res, { ...client, sessions, appointments, photos });
+  const metrics = (
+    await db.execute({
+      sql: `SELECT * FROM client_metrics WHERE client_id=? ORDER BY metric_date ASC, id ASC`,
+      args: [req.params.id],
+    })
+  ).rows;
+  ok(res, { ...client, sessions, appointments, photos, metrics });
 });
 
 app.post('/api/clients', async (req, res) => {
-  const { name, phone, notes, music_link } = req.body || {};
+  const { name, phone, notes, music_link, goal } = req.body || {};
   if (!name || !name.trim()) return bad(res, 'name is required');
   const r = await db.execute({
-    sql: 'INSERT INTO clients (name, phone, notes, music_link) VALUES (?, ?, ?, ?)',
-    args: [name.trim(), phone || null, notes || null, music_link || null],
+    sql: 'INSERT INTO clients (name, phone, notes, music_link, goal) VALUES (?, ?, ?, ?, ?)',
+    args: [name.trim(), phone || null, notes || null, music_link || null, goal || null],
   });
   ok(res, { id: Number(r.lastInsertRowid) });
 });
 
 app.put('/api/clients/:id', async (req, res) => {
-  const { name, phone, notes, archived, music_link } = req.body || {};
+  const { name, phone, notes, archived, music_link, goal } = req.body || {};
   await db.execute({
     sql: `UPDATE clients SET
             name = COALESCE(?, name),
             phone = COALESCE(?, phone),
             notes = COALESCE(?, notes),
             music_link = COALESCE(?, music_link),
+            goal = COALESCE(?, goal),
             archived = COALESCE(?, archived),
             updated_at = datetime('now')
           WHERE id=?`,
-    args: [name ?? null, phone ?? null, notes ?? null, music_link ?? null, archived === undefined ? null : archived ? 1 : 0, req.params.id],
+    args: [name ?? null, phone ?? null, notes ?? null, music_link ?? null, goal ?? null, archived === undefined ? null : archived ? 1 : 0, req.params.id],
   });
   ok(res, { ok: true });
 });
@@ -126,6 +133,53 @@ app.post('/api/clients/:id/photos', async (req, res) => {
 
 app.delete('/api/photos/:id', async (req, res) => {
   await db.execute({ sql: 'DELETE FROM client_photos WHERE id=?', args: [req.params.id] });
+  ok(res, { ok: true });
+});
+
+// ---------- Progress metrics (weight, body fat, measurements) ----------
+
+app.post('/api/clients/:id/metrics', async (req, res) => {
+  const { metric_date, weight, body_fat_pct, chest, waist, hips, arm, thigh, note } = req.body || {};
+  const r = await db.execute({
+    sql: `INSERT INTO client_metrics (client_id, metric_date, weight, body_fat_pct, chest, waist, hips, arm, thigh, note)
+          VALUES (?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [req.params.id, metric_date || null, weight ?? null, body_fat_pct ?? null, chest ?? null, waist ?? null, hips ?? null, arm ?? null, thigh ?? null, note || null],
+  });
+  ok(res, { id: Number(r.lastInsertRowid) });
+});
+
+app.delete('/api/metrics/:id', async (req, res) => {
+  await db.execute({ sql: 'DELETE FROM client_metrics WHERE id=?', args: [req.params.id] });
+  ok(res, { ok: true });
+});
+
+// ---------- Message templates ----------
+
+app.get('/api/templates', async (req, res) => {
+  ok(res, (await db.execute('SELECT * FROM message_templates ORDER BY id')).rows);
+});
+
+app.post('/api/templates', async (req, res) => {
+  const { name, body } = req.body || {};
+  if (!name || !name.trim() || !body || !body.trim()) return bad(res, 'name and body are required');
+  const r = await db.execute({
+    sql: 'INSERT INTO message_templates (name, body) VALUES (?, ?)',
+    args: [name.trim(), body.trim()],
+  });
+  ok(res, { id: Number(r.lastInsertRowid) });
+});
+
+app.put('/api/templates/:id', async (req, res) => {
+  const { name, body } = req.body || {};
+  await db.execute({
+    sql: `UPDATE message_templates SET name=COALESCE(?,name), body=COALESCE(?,body), updated_at=datetime('now') WHERE id=?`,
+    args: [name ?? null, body ?? null, req.params.id],
+  });
+  ok(res, { ok: true });
+});
+
+app.delete('/api/templates/:id', async (req, res) => {
+  await db.execute({ sql: 'DELETE FROM message_templates WHERE id=?', args: [req.params.id] });
   ok(res, { ok: true });
 });
 
@@ -453,8 +507,8 @@ app.get('/api/reports/revenue', async (req, res) => {
 // filesystem, hosting free tier, even Turso) is a "should be fine" — this is
 // a "definitely fine" that lives wherever Anthony puts the downloaded file.
 
-const BACKUP_TABLES = ['clients', 'client_photos', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
-const BACKUP_INSERT_ORDER = ['clients', 'client_photos', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+const BACKUP_TABLES = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+const BACKUP_INSERT_ORDER = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
 const BACKUP_DELETE_ORDER = [...BACKUP_INSERT_ORDER].reverse(); // children before parents
 
 app.get('/api/backup/export', async (req, res) => {

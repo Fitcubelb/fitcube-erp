@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS clients (
   phone TEXT,
   notes TEXT,
   music_link TEXT,                   -- pasted Spotify/Anghami/SoundCloud/YouTube playlist link
+  goal TEXT,                         -- free-text training goal, e.g. "Lose 5kg by December"
   archived INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -107,7 +108,38 @@ CREATE TABLE IF NOT EXISTS purchase_items (
   unit_cost REAL NOT NULL
 );
 
+-- Progress metrics — a dated log entry per weigh-in/measurement, however
+-- often Anthony wants to track a given client (daily, weekly, monthly —
+-- there's no fixed cadence, just log whenever he measures them).
+CREATE TABLE IF NOT EXISTS client_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  metric_date TEXT NOT NULL DEFAULT (datetime('now')),
+  weight REAL,
+  body_fat_pct REAL,
+  chest REAL,
+  waist REAL,
+  hips REAL,
+  arm REAL,
+  thigh REAL,
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Reusable WhatsApp message templates (payment reminders, session reminders,
+-- etc.) with {name}/{service}/{when}/{amount} placeholders filled in per
+-- client when sending. Editable/addable from the app — seeded with three
+-- sensible defaults the first time this table is empty (see client.js).
+CREATE TABLE IF NOT EXISTS message_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_session_entries_client ON session_entries(client_id);
 CREATE INDEX IF NOT EXISTS idx_appointments_client ON appointments(client_id);
 CREATE INDEX IF NOT EXISTS idx_appointments_starts_at ON appointments(starts_at);
 CREATE INDEX IF NOT EXISTS idx_client_photos_client ON client_photos(client_id);
+CREATE INDEX IF NOT EXISTS idx_client_metrics_client ON client_metrics(client_id);
