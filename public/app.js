@@ -90,7 +90,37 @@ async function sendWhatsAppReminder(client, message, bodyParams) {
   }
 }
 
-function closeModal() { modalRoot.innerHTML = ''; }
+// While a modal is open the page behind it must not scroll. iOS Safari
+// ignores `overflow: hidden` on the body, so the reliable fix is to pin the
+// body in place at its current scroll offset and restore that offset when the
+// modal closes.
+let scrollLockY = 0;
+let scrollLocked = false;
+function lockPageScroll() {
+  if (scrollLocked) return;
+  scrollLockY = window.scrollY || window.pageYOffset || 0;
+  document.body.style.position = 'fixed';
+  document.body.style.top = `-${scrollLockY}px`;
+  document.body.style.left = '0';
+  document.body.style.right = '0';
+  document.body.style.width = '100%';
+  scrollLocked = true;
+}
+function unlockPageScroll() {
+  if (!scrollLocked) return;
+  document.body.style.position = '';
+  document.body.style.top = '';
+  document.body.style.left = '';
+  document.body.style.right = '';
+  document.body.style.width = '';
+  scrollLocked = false;
+  window.scrollTo(0, scrollLockY);
+}
+
+function closeModal() {
+  modalRoot.innerHTML = '';
+  unlockPageScroll();
+}
 function openModal(innerHtml) {
   modalRoot.innerHTML = `
     <div class="modal-backdrop" id="modal-backdrop">
@@ -101,26 +131,43 @@ function openModal(innerHtml) {
         </div>
       </div>
     </div>`;
+  lockPageScroll();
   document.getElementById('modal-close').onclick = closeModal;
-  document.getElementById('modal-backdrop').addEventListener('click', (e) => {
+  const backdrop = document.getElementById('modal-backdrop');
+  backdrop.addEventListener('click', (e) => {
     if (e.target.id === 'modal-backdrop') closeModal();
   });
+  // Dragging the dimmed area outside the sheet shouldn't move anything.
+  backdrop.addEventListener('touchmove', (e) => {
+    if (e.target === backdrop) e.preventDefault();
+  }, { passive: false });
 }
 
 // ---------- router ----------
 
 function currentRoute() {
-  const hash = location.hash.replace(/^#\//, '') || 'dashboard';
-  const [route, param] = hash.split('/');
-  return { route, param };
+  const raw = location.hash.replace(/^#\//, '') || 'dashboard';
+  const [path, queryStr] = raw.split('?');
+  const [route, param] = path.split('/');
+  return { route, param, query: new URLSearchParams(queryStr || '') };
 }
 
 async function render() {
-  const { route, param } = currentRoute();
+  const { route, param, query } = currentRoute();
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === route));
   refreshStatusPill();
 
   if (route === 'dashboard') return renderDashboard();
+  // #/clients/new?name=…&phone=… — lets an iOS Shortcut (or any link) hand a
+  // contact straight into the New client form, which is the closest thing
+  // iPhone allows to picking from the address book inside a web app.
+  if (route === 'clients' && param === 'new') {
+    await renderClientsList();
+    openAddClientModal({ name: query.get('name') || '', phone: query.get('phone') || '' });
+    // Clean the URL without triggering another render.
+    history.replaceState(null, '', '#/clients');
+    return;
+  }
   if (route === 'clients' && !param) return renderClientsList();
   if (route === 'clients' && param) return renderClientDetail(param);
   if (route === 'schedule') return renderSchedule();
@@ -128,7 +175,10 @@ async function render() {
   if (route === 'sales') return renderSales();
   return renderDashboard();
 }
-window.addEventListener('hashchange', render);
+// Leaving the current screen should dismiss whatever sheet is open (and
+// release the background scroll lock with it). Background sync also calls
+// render(), so this deliberately hangs off hashchange rather than render.
+window.addEventListener('hashchange', () => { closeModal(); render(); });
 document.querySelectorAll('.tab').forEach((btn) => {
   btn.addEventListener('click', () => { location.hash = '#/' + btn.dataset.route; });
 });
@@ -312,49 +362,81 @@ function paintClientsList(data, fromCache) {
     const q = e.target.value.trim().toLowerCase();
     paintRows(rows.filter((c) => c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)));
   });
-  document.getElementById('add-client-fab').addEventListener('click', openAddClientModal);
+  document.getElementById('add-client-fab').addEventListener('click', () => openAddClientModal());
 }
 
+// Android Chrome implements the Contact Picker API, which opens the real
+// address book. iOS Safari does not (Apple only allows native apps to browse
+// Contacts), so there we fall back to reading the clipboard — the user copies
+// the number in the Contacts app and taps one button here.
 const CONTACT_PICKER_SUPPORTED = 'contacts' in navigator && 'ContactsManager' in window;
+const CLIPBOARD_READ_SUPPORTED = !!(navigator.clipboard && navigator.clipboard.readText);
 
-// Renders a "Choose from Contacts" button (Android Chrome only — iOS Safari
-// doesn't let web apps browse the address book at all) and wires it up to
-// fill the given phone input (and optionally a name input) from the picked
-// contact. Call contactPickerButtonHtml() where the button should render,
-// then wireContactPicker() after the modal's HTML is in the DOM.
+// Tip shown under the name/phone fields on iPhone, where the button above is
+// a clipboard paste rather than a real picker.
+const CONTACT_TIP_HTML = CONTACT_PICKER_SUPPORTED
+  ? ''
+  : `<div class="sub" style="margin-top:8px;line-height:1.45">On iPhone: tap the Name or Phone box and choose <b>AutoFill Contact</b> above the keyboard to pull a contact in. (Needs Settings → Safari → AutoFill → Contact Info switched on.) Or copy the number in Contacts and use the Paste button.</div>`;
+
+// Renders the button that fills a phone field from the address book. Call
+// contactPickerButtonHtml() where the button should render, then
+// wireContactPicker() once the modal's HTML is in the DOM.
 function contactPickerButtonHtml(btnId) {
-  return CONTACT_PICKER_SUPPORTED
-    ? `<button type="button" class="btn secondary block" id="${btnId}" style="margin-bottom:6px">Choose from Contacts</button>`
-    : '';
+  if (CONTACT_PICKER_SUPPORTED) {
+    return `<button type="button" class="btn secondary block" id="${btnId}" style="margin-bottom:6px">Choose from Contacts</button>`;
+  }
+  if (CLIPBOARD_READ_SUPPORTED) {
+    return `<button type="button" class="btn secondary block" id="${btnId}" style="margin-bottom:6px">Paste number from Contacts</button>`;
+  }
+  return '';
 }
 function wireContactPicker(btnId, phoneInputId, nameInputId) {
   const btn = document.getElementById(btnId);
   if (!btn) return;
   btn.addEventListener('click', async () => {
-    try {
-      const [contact] = await navigator.contacts.select(['name', 'tel'], { multiple: false });
-      if (contact) {
-        if (nameInputId && contact.name && contact.name[0]) document.getElementById(nameInputId).value = contact.name[0];
-        if (contact.tel && contact.tel[0]) document.getElementById(phoneInputId).value = contact.tel[0];
+    if (CONTACT_PICKER_SUPPORTED) {
+      try {
+        const [contact] = await navigator.contacts.select(['name', 'tel'], { multiple: false });
+        if (contact) {
+          if (nameInputId && contact.name && contact.name[0]) document.getElementById(nameInputId).value = contact.name[0];
+          if (contact.tel && contact.tel[0]) document.getElementById(phoneInputId).value = contact.tel[0];
+        }
+      } catch (err) {
+        // user cancelled the picker, or permission denied — nothing to do
       }
+      return;
+    }
+    // iPhone path: pull whatever number was copied in the Contacts app.
+    try {
+      const text = await navigator.clipboard.readText();
+      const number = (text || '').replace(/[^\d+]/g, '');
+      if (!number) {
+        alert('Nothing copied yet.\n\nOpen Contacts, press and hold the phone number, tap Copy — then come back here and tap this button again.');
+        return;
+      }
+      document.getElementById(phoneInputId).value = number;
     } catch (err) {
-      // user cancelled the picker, or permission denied — nothing to do
+      alert('Couldn\'t read what you copied.\n\nPress and hold the Phone box below and tap Paste instead.');
     }
   });
 }
 
-function openAddClientModal() {
+function openAddClientModal(prefill = {}) {
   openModal(`
     <h3>New client</h3>
     ${contactPickerButtonHtml('pick-contact-btn')}
-    <label>Name</label><input id="f-name" placeholder="Full name" autocomplete="name" />
-    <label>Phone</label><input id="f-phone" placeholder="70 123 456" autocomplete="tel" type="tel" />
+    <form id="f-contact-form" autocomplete="on" onsubmit="event.preventDefault()">
+      <label>Name</label>
+      <input id="f-name" name="name" placeholder="Full name" autocomplete="name" value="${esc(prefill.name || '')}" />
+      <label>Phone</label>
+      <input id="f-phone" name="tel" placeholder="70 123 456" autocomplete="tel" type="tel" value="${esc(prefill.phone || '')}" />
+    </form>
+    ${CONTACT_TIP_HTML}
     <label>Notes</label><textarea id="f-notes" placeholder="Optional"></textarea>
     <label>Goal (optional)</label>
     <input id="f-goal" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
     <label>Preferred music (optional)</label>
     <input id="f-music" placeholder="Paste a Spotify / Anghami / SoundCloud / YouTube link" autocomplete="off" />
-    ${!CONTACT_PICKER_SUPPORTED ? `<div class="sub" style="margin-top:8px">Tip: tap into Name or Phone — your phone may suggest matching contacts as you type.</div>` : ''}
     <div class="btn-row"><button class="btn block" id="f-save">Save client</button></div>
   `);
   wireContactPicker('pick-contact-btn', 'f-phone', 'f-name');
@@ -519,9 +601,14 @@ function sessionRowHtml(s) {
 function openEditClientModal(c) {
   openModal(`
     <h3>Edit ${esc(c.name)}</h3>
-    <label>Name</label><input id="f-name" value="${esc(c.name)}" />
-    <label>Phone</label><input id="f-phone" value="${esc(c.phone || '')}" />
     ${contactPickerButtonHtml('pick-contact-btn')}
+    <form id="f-contact-form" autocomplete="on" onsubmit="event.preventDefault()">
+      <label>Name</label>
+      <input id="f-name" name="name" value="${esc(c.name)}" autocomplete="name" />
+      <label>Phone</label>
+      <input id="f-phone" name="tel" value="${esc(c.phone || '')}" type="tel" autocomplete="tel" placeholder="70 123 456" />
+    </form>
+    ${CONTACT_TIP_HTML}
     <label>Notes</label><textarea id="f-notes">${esc(c.notes || '')}</textarea>
     <label>Goal</label>
     <input id="f-goal" value="${esc(c.goal || '')}" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
@@ -991,8 +1078,13 @@ function openNewAppointmentModal(clientsIn, servicesIn, onSaved) {
     <button type="button" class="btn secondary" id="f-client-new-toggle" style="margin-top:8px;padding:6px 10px;font-size:0.78rem">+ Add new client</button>
     <div id="f-client-new-fields" hidden style="margin-top:6px">
       ${contactPickerButtonHtml('f-newclient-pick-contact')}
-      <label>Name</label><input id="f-newclient-name" placeholder="Full name" autocomplete="name" />
-      <label>Phone</label><input id="f-newclient-phone" placeholder="70 123 456" type="tel" autocomplete="tel" />
+      <form id="f-newclient-form" autocomplete="on" onsubmit="event.preventDefault()">
+        <label>Name</label>
+        <input id="f-newclient-name" name="name" placeholder="Full name" autocomplete="name" />
+        <label>Phone</label>
+        <input id="f-newclient-phone" name="tel" placeholder="70 123 456" type="tel" autocomplete="tel" />
+      </form>
+      ${CONTACT_TIP_HTML}
     </div>
 
     <label style="margin-top:16px">Service</label>

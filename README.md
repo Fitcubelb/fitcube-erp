@@ -16,7 +16,21 @@ A client, session, schedule and small-inventory manager for Fit Cube (Anthony Za
 - **Light and dark mode** — follows your phone's system setting automatically; tap the ☾/☀ button top-right to override it. Remembered per device.
 - **Sort/find clients your way** — on the Clients tab: A–Z, Most active (by session count), or Not coming anymore (longest since their last session first, with an "at risk" tag once it's been 30+ days). Each client also shows "Last session: Xd ago" so you can spot who's drifted away at a glance. Search is a plain type-as-you-go box (not a dropdown) and ignores capitalization — searching a first name, last name, or part of either all work.
 - **WhatsApp reminders** — a "Remind" button on upcoming appointments (and a general "WhatsApp" button on each client) opens WhatsApp directly with the message pre-written — one tap to send, no browser involved, $0. See "WhatsApp reminders" below for the fully-automatic upgrade option.
-- **Add clients from your Contacts** — on Android, "Choose from Contacts" fills the name/phone straight from your phone's address book, wherever there's a phone field: adding a client, editing one, and adding a new client inline from the Schedule tab. (iOS/Safari doesn't allow web apps to browse Contacts — Apple restricts that to native apps only — so on iPhone the Name/Phone fields instead support Safari's own contact-suggestion autofill as you type.)
+- **Add clients from your Contacts** — wherever there's a phone field (adding a client, editing one, adding a new client inline from the Schedule tab) there are three ways to get a number in without typing it. On Android, "Choose from Contacts" opens the address book directly. On iPhone, Apple blocks web apps from browsing Contacts, so instead: (1) tap the Name or Phone box and pick **AutoFill Contact** above the keyboard — that opens your contact list and fills both fields (needs Settings → Safari → AutoFill → Contact Info switched on); (2) copy a number in the Contacts app and tap **Paste number from Contacts**; or (3) use the Shortcut below, which is the closest thing to a real contact picker.
+
+### iPhone: one-tap "add this contact as a client" (optional, 2 minutes to set up)
+
+Apple won't let the app read Contacts, but it *will* let a Shortcut do it and hand the result over. Set this up once and adding a client becomes: run the Shortcut → pick the contact → the app opens with the name and number already filled in.
+
+1. Open the **Shortcuts** app → **+** to create a new shortcut.
+2. Add the action **Select Contact** (search "contact").
+3. Add **Get Details of Contacts** → set it to **Phone Number**, with "Select Contact" as its input.
+4. Add **Text**, and set its content to (using the magic-variable picker for the two variables):
+   `https://fitcube-erp.onrender.com/#/clients/new?name=[Select Contact]&phone=[Phone Number]`
+5. Add **Open URLs**, with that Text as its input.
+6. Name it something like "Add Fit Cube client" and, from the shortcut's settings, **Add to Home Screen** so it sits next to the app.
+
+The app accepts `#/clients/new?name=…&phone=…` from anywhere, so this also works from a link, a QR code, or the Share sheet.
 - **Search everywhere it matters** — Clients, Stock, and Schedule all have a plain type-as-you-go search box, and the Schedule tab's "New appointment" screen lets you search for a client by name instead of scrolling a list — with "+ Add new client" and "+ Add new service" right there if either doesn't exist yet, so a booking never has to be interrupted.
 - **Progress photos** — every client page has a photo strip for before/after and progress shots. Tap + to add one (or take one on the spot with your phone's camera); photos are automatically resized and compressed in your browser before upload, so this stays fast and light. Tap any photo to see it full-size, add a caption, or delete it.
 - **Preferred music, one tap away** — paste a client's Spotify, Anghami, SoundCloud, or YouTube playlist link on their profile (when adding or editing a client), and a "Play on [App]" button appears on their page that opens it directly — handy for starting their playlist right as a session begins.
