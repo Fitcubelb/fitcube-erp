@@ -9,7 +9,7 @@ A client, session, schedule and small-inventory manager for Fit Cube (Anthony Za
 - **Schedule** — book appointments per client and service, mark done/cancelled.
 - **Stock** — track products, quantities, cost/sale price, low-stock warning.
 - **Sales & Purchases** — record a sale (deducts stock) or a restock purchase (adds stock).
-- **Works offline** — the app keeps working with no signal (in the gym, on the road). Anything you add or change offline is saved on your phone and sent to the server automatically the next time you're online — nothing is lost.
+- **Works offline** — the app keeps working with no signal (in the gym, on the road). Anything you add or change offline is saved on your phone and sent to the server automatically the next time you're online — nothing is lost, and you see the change on screen right away rather than having to go back online first to see it.
 - **Installable on your phone** — add it to your home screen and it behaves like a normal app, no App Store needed. Uses your Fit Cube logo as the icon.
 - **Revenue by service** — the Sales tab shows total revenue broken down by service (PT, EMS, Presso, etc.) and top-selling products, so you can see what's actually making money.
 - **One-tap backup** — ⚙ Settings → Data & backup saves your entire database (clients, sessions, balances, products, sales) to your phone or Google Drive. See "Protecting your data" below — do this regularly.

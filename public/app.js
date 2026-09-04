@@ -720,7 +720,7 @@ async function renderClientDetail(id) {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (!confirm('Delete this metric entry?')) return;
-      await api.deleteMetric(btn.dataset.removeMetric);
+      await api.deleteMetric(btn.dataset.removeMetric, id);
       renderClientDetail(id);
     });
   });
@@ -734,7 +734,7 @@ async function renderClientDetail(id) {
   viewEl.querySelectorAll('[data-mark-paid]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      await api.updateSession(btn.dataset.markPaid, { payment_state: 'paid_now' });
+      await api.updateSession(btn.dataset.markPaid, { payment_state: 'paid_now' }, id);
       renderClientDetail(id);
     });
   });
@@ -742,7 +742,7 @@ async function renderClientDetail(id) {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (!confirm('Remove this session entry?')) return;
-      await api.deleteSession(btn.dataset.removeSession);
+      await api.deleteSession(btn.dataset.removeSession, id);
       renderClientDetail(id);
     });
   });
@@ -903,7 +903,7 @@ function openPhotoLightbox(photo, clientId) {
   `);
   document.getElementById('f-delete-photo').addEventListener('click', async () => {
     if (!confirm('Delete this photo? This cannot be undone.')) return;
-    await api.deletePhoto(photo.id);
+    await api.deletePhoto(photo.id, clientId);
     closeModal();
     renderClientDetail(clientId);
   });

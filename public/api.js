@@ -79,6 +79,25 @@ async function mutate(method, url, body) {
   }
 }
 
+// A client's page is one bundle (client + sessions + appointments + photos +
+// metrics) cached under one key, refreshed only by a successful GET. Writes
+// that touch a client's sub-resources (logging a session, adding a photo or
+// metric, scheduling an appointment from their page, and their edits/deletes)
+// used to skip past that cache entirely — so made offline, they'd queue for
+// later sync but the client's own page kept showing the old bundle until the
+// next successful fetch, i.e. until back online. This patches the cached
+// bundle in place so the change is visible immediately either way. No-op if
+// that client's page has never been cached (nothing to patch).
+async function patchClientDetailCache(clientId, mutator) {
+  if (!clientId) return;
+  const key = `client_detail_${clientId}`;
+  const cached = await idb.get('meta', key);
+  if (!cached || !cached.value) return;
+  const bundle = { ...cached.value };
+  mutator(bundle);
+  await idb.put('meta', { key, value: bundle });
+}
+
 const api = {
   async listClients() {
     try {
@@ -105,6 +124,12 @@ const api = {
     const result = await mutate('POST', '/api/clients', payload);
     const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
     await idb.put('clients', { id, archived: 0, balance: null, _pending: result.offline, ...payload });
+    // So opening this client's own page works right away even if made and
+    // viewed offline in the same visit, before any sync has fetched it.
+    await idb.put('meta', {
+      key: `client_detail_${id}`,
+      value: { id, archived: 0, sessions: [], appointments: [], photos: [], metrics: [], _pending: result.offline, ...payload },
+    });
     return { id, offline: result.offline };
   },
 
@@ -112,19 +137,49 @@ const api = {
     const result = await mutate('PUT', `/api/clients/${id}`, payload);
     const existing = (await idb.get('clients', id)) || { id };
     await idb.put('clients', { ...existing, ...payload, _pending: result.offline || existing._pending });
+    // The clients LIST reads from the store just updated above, but a
+    // client's own page reads from a separate cached bundle — without this
+    // it kept showing the old name/phone/notes until back online.
+    await patchClientDetailCache(id, (bundle) => {
+      Object.assign(bundle, payload);
+      bundle._pending = result.offline || bundle._pending;
+    });
     return result;
   },
 
   async logSession(clientId, payload) {
-    return mutate('POST', `/api/clients/${clientId}/sessions`, payload);
+    const result = await mutate('POST', `/api/clients/${clientId}/sessions`, payload);
+    const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
+    let service_name = null;
+    if (payload.service_id) {
+      const svc = await idb.get('services', Number(payload.service_id));
+      service_name = svc ? svc.name : null;
+    }
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.sessions = [
+        { id, client_id: Number(clientId), created_at: new Date().toISOString(), service_name, _pending: result.offline, ...payload },
+        ...(bundle.sessions || []),
+      ];
+    });
+    return result;
   },
 
-  async updateSession(sessionId, payload) {
-    return mutate('PUT', `/api/sessions/${sessionId}`, payload);
+  async updateSession(sessionId, payload, clientId) {
+    const result = await mutate('PUT', `/api/sessions/${sessionId}`, payload);
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.sessions = (bundle.sessions || []).map((s) =>
+        String(s.id) === String(sessionId) ? { ...s, ...payload, _pending: result.offline || s._pending } : s
+      );
+    });
+    return result;
   },
 
-  async deleteSession(sessionId) {
-    return mutate('DELETE', `/api/sessions/${sessionId}`, undefined);
+  async deleteSession(sessionId, clientId) {
+    const result = await mutate('DELETE', `/api/sessions/${sessionId}`, undefined);
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.sessions = (bundle.sessions || []).filter((s) => String(s.id) !== String(sessionId));
+    });
+    return result;
   },
 
   async listServices() {
@@ -138,19 +193,40 @@ const api = {
   },
 
   async addClientPhoto(clientId, payload) {
-    return mutate('POST', `/api/clients/${clientId}/photos`, payload);
+    const result = await mutate('POST', `/api/clients/${clientId}/photos`, payload);
+    const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.photos = [
+        { id, client_id: Number(clientId), taken_at: new Date().toISOString(), created_at: new Date().toISOString(), _pending: result.offline, ...payload },
+        ...(bundle.photos || []),
+      ];
+    });
+    return result;
   },
 
-  async deletePhoto(photoId) {
-    return mutate('DELETE', `/api/photos/${photoId}`, undefined);
+  async deletePhoto(photoId, clientId) {
+    const result = await mutate('DELETE', `/api/photos/${photoId}`, undefined);
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.photos = (bundle.photos || []).filter((p) => String(p.id) !== String(photoId));
+    });
+    return result;
   },
 
   async addClientMetric(clientId, payload) {
-    return mutate('POST', `/api/clients/${clientId}/metrics`, payload);
+    const result = await mutate('POST', `/api/clients/${clientId}/metrics`, payload);
+    const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.metrics = [...(bundle.metrics || []), { id, client_id: Number(clientId), _pending: result.offline, ...payload }];
+    });
+    return result;
   },
 
-  async deleteMetric(metricId) {
-    return mutate('DELETE', `/api/metrics/${metricId}`, undefined);
+  async deleteMetric(metricId, clientId) {
+    const result = await mutate('DELETE', `/api/metrics/${metricId}`, undefined);
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.metrics = (bundle.metrics || []).filter((m) => String(m.id) !== String(metricId));
+    });
+    return result;
   },
 
   async listTemplates() {
@@ -203,7 +279,22 @@ const api = {
   async createAppointment(payload) {
     const result = await mutate('POST', '/api/appointments', payload);
     const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
-    await idb.put('appointments', { id, status: 'scheduled', _pending: result.offline, ...payload });
+    let service_name = null;
+    if (payload.service_id) {
+      const svc = await idb.get('services', Number(payload.service_id));
+      service_name = svc ? svc.name : null;
+    }
+    await idb.put('appointments', { id, status: 'scheduled', service_name, _pending: result.offline, ...payload });
+    // Booked from a client's own page (has client_id) — also show up there
+    // right away, not just once the Schedule tab next syncs.
+    if (payload.client_id) {
+      await patchClientDetailCache(payload.client_id, (bundle) => {
+        bundle.appointments = [
+          { id, status: 'scheduled', service_name, _pending: result.offline, ...payload },
+          ...(bundle.appointments || []),
+        ];
+      });
+    }
     return { id, offline: result.offline };
   },
 
