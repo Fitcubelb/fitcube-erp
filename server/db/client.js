@@ -28,6 +28,8 @@ async function init() {
   const migrations = [
     "ALTER TABLE clients ADD COLUMN music_link TEXT",
     "ALTER TABLE clients ADD COLUMN goal TEXT",
+    "ALTER TABLE session_entries ADD COLUMN redeemed_at TEXT",
+    "ALTER TABLE package_sales ADD COLUMN payment_state TEXT NOT NULL DEFAULT 'paid_now'",
   ];
   for (const m of migrations) {
     try {

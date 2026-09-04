@@ -315,7 +315,7 @@ app.get('/api/clients', async (req, res) => {
       SELECT client_id,
         SUM(CASE WHEN payment_state='unpaid' THEN COALESCE(amount,0) ELSE 0 END) AS unpaid_amount,
         SUM(CASE WHEN payment_state='unpaid' AND amount IS NULL THEN 1 ELSE 0 END) AS unpaid_sessions_no_amount,
-        SUM(CASE WHEN payment_state='prepaid' AND amount IS NULL THEN 1 ELSE 0 END) AS prepaid_session_credits,
+        SUM(CASE WHEN payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL THEN 1 ELSE 0 END) AS prepaid_session_credits,
         SUM(CASE WHEN payment_state='prepaid' AND amount IS NOT NULL THEN amount ELSE 0 END) AS prepaid_amount,
         COUNT(*) AS total_sessions,
         MAX(COALESCE(session_date, created_at)) AS last_activity
@@ -323,6 +323,18 @@ app.get('/api/clients', async (req, res) => {
     `)
   ).rows;
   const byClient = Object.fromEntries(balances.map((b) => [Number(b.client_id), b]));
+
+  // Unpaid package/credit sales (see "Give credits") owe money the same way
+  // an unpaid session does — folded into the same unpaid_amount so the
+  // client list badge matches the "Owed" figure on the client's own page.
+  const unpaidPackages = (
+    await db.execute(`SELECT client_id, SUM(price) AS total FROM package_sales WHERE payment_state='unpaid' GROUP BY client_id`)
+  ).rows;
+  for (const p of unpaidPackages) {
+    const cid = Number(p.client_id);
+    if (!byClient[cid]) byClient[cid] = { client_id: cid, unpaid_amount: 0, unpaid_sessions_no_amount: 0, prepaid_session_credits: 0, prepaid_amount: 0, total_sessions: 0, last_activity: null };
+    byClient[cid].unpaid_amount = (Number(byClient[cid].unpaid_amount) || 0) + Number(p.total);
+  }
 
   ok(res, rows.map((c) => ({ ...c, balance: byClient[Number(c.id)] || null })));
 });
@@ -780,21 +792,26 @@ app.delete('/api/packages/:id', async (req, res) => {
 // a one-off), so this route trusts them rather than re-deriving from
 // package_id — the same way /api/sales trusts the unit_price it's given.
 app.post('/api/clients/:id/packages', async (req, res) => {
-  const { package_id, name, session_count, price, note } = req.body || {};
+  const { package_id, name, session_count, price, note, payment_state } = req.body || {};
   if (!name || !String(name).trim()) return bad(res, 'name is required');
   const count = Number(session_count);
   if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) return bad(res, 'session_count must be a whole number of 1 or more');
   const priceNum = Number(price);
   if (!Number.isFinite(priceNum) || priceNum < 0) return bad(res, 'price must be 0 or more');
+  const state = payment_state || 'paid_now';
+  if (!['paid_now', 'unpaid'].includes(state)) return bad(res, "payment_state must be 'paid_now' or 'unpaid'");
 
   const client = (await db.execute({ sql: 'SELECT id FROM clients WHERE id=?', args: [req.params.id] })).rows[0];
   if (!client) return bad(res, 'Client not found', 404);
 
   const trimmedName = String(name).trim();
   const saleRes = await db.execute({
-    sql: 'INSERT INTO package_sales (client_id, package_id, name, session_count, price, note) VALUES (?, ?, ?, ?, ?, ?)',
-    args: [req.params.id, package_id || null, trimmedName, count, priceNum, note || null],
+    sql: 'INSERT INTO package_sales (client_id, package_id, name, session_count, price, payment_state, note) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    args: [req.params.id, package_id || null, trimmedName, count, priceNum, state, note || null],
   });
+  // Credits are handed over right away regardless of whether the client has
+  // paid yet — payment is tracked separately on the package_sales row above,
+  // the same way an unpaid session still counts as a session that happened.
   for (let i = 0; i < count; i++) {
     await db.execute({
       sql: `INSERT INTO session_entries (client_id, payment_state, amount, note, source) VALUES (?, 'prepaid', NULL, ?, 'manual')`,
@@ -802,6 +819,47 @@ app.post('/api/clients/:id/packages', async (req, res) => {
     });
   }
   ok(res, { id: Number(saleRes.lastInsertRowid), credits_added: count });
+});
+
+// Flip a package sale from unpaid to paid — the same idea as "Mark paid" on
+// a session entry, just for a batch-of-credits sale instead of a single one.
+app.put('/api/package-sales/:id', async (req, res) => {
+  const { payment_state } = req.body || {};
+  if (!['paid_now', 'unpaid'].includes(payment_state)) return bad(res, "payment_state must be 'paid_now' or 'unpaid'");
+  await db.execute({ sql: 'UPDATE package_sales SET payment_state=? WHERE id=?', args: [payment_state, req.params.id] });
+  ok(res, { ok: true });
+});
+
+// Redeems the client's oldest available prepaid credit for an actual visit:
+// turns a still-unused credit row (payment_state='prepaid', amount NULL,
+// redeemed_at NULL) into the record of that visit by stamping it with today's
+// date, the service given, and redeemed_at — so it stops counting toward
+// "credits left" without losing the fact that a credit was used. Picks the
+// oldest one (FIFO) rather than requiring the caller to pick a specific
+// package sale, since credits from different packages are fungible here.
+app.post('/api/clients/:id/redeem-credit', async (req, res) => {
+  const { service_id, note } = req.body || {};
+  const client = (await db.execute({ sql: 'SELECT id FROM clients WHERE id=?', args: [req.params.id] })).rows[0];
+  if (!client) return bad(res, 'Client not found', 404);
+  const credit = (
+    await db.execute({
+      sql: `SELECT id FROM session_entries
+            WHERE client_id=? AND payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL
+            ORDER BY created_at ASC LIMIT 1`,
+      args: [req.params.id],
+    })
+  ).rows[0];
+  if (!credit) return bad(res, 'No prepaid credits available for this client');
+  await db.execute({
+    sql: `UPDATE session_entries SET
+            session_date = datetime('now'),
+            service_id = COALESCE(?, service_id),
+            note = COALESCE(?, note),
+            redeemed_at = datetime('now')
+          WHERE id=?`,
+    args: [service_id || null, note || null, credit.id],
+  });
+  ok(res, { id: credit.id });
 });
 
 // ---------- Sales ----------
@@ -921,14 +979,18 @@ app.get('/api/dashboard/summary', async (req, res) => {
   // maybeCreateSnapshot below) — deliberately not awaited so a slow snapshot
   // never delays this response.
   maybeCreateSnapshot();
-  const unpaid = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total, COUNT(*) as n FROM session_entries WHERE payment_state='unpaid'`)).rows[0];
-  const prepaidCredits = (await db.execute(`SELECT COUNT(*) as n FROM session_entries WHERE payment_state='prepaid' AND amount IS NULL`)).rows[0];
+  const unpaidSessions = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total, COUNT(*) as n FROM session_entries WHERE payment_state='unpaid'`)).rows[0];
+  const unpaidPackages = (await db.execute(`SELECT COALESCE(SUM(price),0) as total, COUNT(*) as n FROM package_sales WHERE payment_state='unpaid'`)).rows[0];
+  const unpaid = { total: Number(unpaidSessions.total) + Number(unpaidPackages.total), n: Number(unpaidSessions.n) + Number(unpaidPackages.n) };
+  // Only credits nobody has redeemed yet count as "left" — a redeemed one is
+  // now the record of an actual visit, not an outstanding credit.
+  const prepaidCredits = (await db.execute(`SELECT COUNT(*) as n FROM session_entries WHERE payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL`)).rows[0];
   const lowStock = (await db.execute('SELECT COUNT(*) as n FROM products WHERE qty_on_hand <= reorder_level')).rows[0];
   const todayCount = (await db.execute(`SELECT COUNT(*) as n FROM appointments WHERE date(starts_at) = date('now') AND status='scheduled'`)).rows[0];
   const clientCount = (await db.execute('SELECT COUNT(*) as n FROM clients WHERE archived=0')).rows[0];
   const sessionRevenue = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL`)).rows[0];
   const productRevenue = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM sales')).rows[0];
-  const packageRevenue = (await db.execute('SELECT COALESCE(SUM(price),0) as total FROM package_sales')).rows[0];
+  const packageRevenue = (await db.execute(`SELECT COALESCE(SUM(price),0) as total FROM package_sales WHERE payment_state='paid_now'`)).rows[0];
   // Cost of goods sold: what the products actually sold cost you, valued at
   // each product's current cost price (this app doesn't snapshot historical
   // cost per sale, so if you change a cost price, past COGS re-values too —
@@ -1000,7 +1062,7 @@ async function moneyByPeriod() {
     await db.execute(`SELECT ${periodCase('sale_date', 'total')} FROM sales`)
   ).rows[0];
   const packageRevenue = (
-    await db.execute(`SELECT ${periodCase('sold_at', 'price')} FROM package_sales`)
+    await db.execute(`SELECT ${periodCase('sold_at', 'price')} FROM package_sales WHERE payment_state='paid_now'`)
   ).rows[0];
   const cogsByPeriod = (
     await db.execute(`

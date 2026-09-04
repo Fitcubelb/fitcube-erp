@@ -731,9 +731,12 @@ async function renderClientDetail(id) {
   const photos = c.photos || [];
   const metrics = c.metrics || [];
   const packages = c.packages || [];
-  const unpaidTotal = sessions.filter((s) => s.payment_state === 'unpaid').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+  const unpaidSessionsTotal = sessions.filter((s) => s.payment_state === 'unpaid').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+  const unpaidPackagesTotal = packages.filter((p) => p.payment_state === 'unpaid').reduce((sum, p) => sum + (Number(p.price) || 0), 0);
+  const unpaidTotal = unpaidSessionsTotal + unpaidPackagesTotal;
   const unpaidNoAmt = sessions.filter((s) => s.payment_state === 'unpaid' && s.amount === null).length;
-  const credits = sessions.filter((s) => s.payment_state === 'prepaid' && s.amount === null).length;
+  // A credit is "left" only while nobody has redeemed it yet.
+  const credits = sessions.filter((s) => s.payment_state === 'prepaid' && s.amount === null && !s.redeemed_at).length;
 
   viewEl.innerHTML = `
     <button class="btn secondary" onclick="location.hash='#/clients'" style="margin-bottom:10px">← Clients</button>
@@ -754,10 +757,9 @@ async function renderClientDetail(id) {
     </div>
 
     <div class="btn-row">
-      <button class="btn block" id="log-session-btn">Log session</button>
+      <button class="btn block" id="record-payment-btn">Record payment</button>
       <button class="btn secondary block" id="add-appt-btn">Schedule</button>
     </div>
-    <button class="btn secondary block" id="sell-package-btn" style="margin-top:8px">Sell a package</button>
 
     <h2>Progress photos</h2>
     <div class="photo-strip" id="photo-strip">
@@ -802,9 +804,8 @@ async function renderClientDetail(id) {
   `;
 
   document.getElementById('edit-client-btn').addEventListener('click', () => openEditClientModal(c));
-  document.getElementById('log-session-btn').addEventListener('click', () => openLogSessionModal(c.id));
+  document.getElementById('record-payment-btn').addEventListener('click', () => openRecordPaymentModal(c.id, credits));
   document.getElementById('add-appt-btn').addEventListener('click', () => openAddAppointmentModal(c.id));
-  document.getElementById('sell-package-btn').addEventListener('click', () => openSellPackageModal(c.id));
   const remindBtn = document.getElementById('remind-btn');
   if (remindBtn) remindBtn.addEventListener('click', () => {
     const nextAppt = appts
@@ -844,6 +845,13 @@ async function renderClientDetail(id) {
       renderClientDetail(id);
     });
   });
+  viewEl.querySelectorAll('[data-mark-paid-package]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await api.markPackagePaid(btn.dataset.markPaidPackage, id);
+      renderClientDetail(id);
+    });
+  });
   viewEl.querySelectorAll('[data-remove-session]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -855,16 +863,20 @@ async function renderClientDetail(id) {
 }
 
 function sessionRowHtml(s) {
-  const stateBadge = s.payment_state === 'unpaid'
-    ? `<span class="badge unpaid">unpaid${s.amount ? ' · ' + money(s.amount) : ''}</span>`
-    : s.payment_state === 'prepaid'
-      ? `<span class="badge credit">credit${s.amount ? ' · ' + money(s.amount) : ''}</span>`
-      : `<span class="badge neutral">paid ${money(s.amount)}</span>`;
-  const tag = s.tag ? `<span class="tag-chip">${esc(s.tag)}</span>` : '';
+  let stateBadge;
+  if (s.payment_state === 'unpaid') {
+    stateBadge = `<span class="badge unpaid">unpaid${s.amount ? ' · ' + money(s.amount) : ''}</span>`;
+  } else if (s.payment_state === 'prepaid') {
+    stateBadge = s.redeemed_at
+      ? `<span class="badge credit">used a credit</span>`
+      : `<span class="badge credit">credit available</span>`;
+  } else {
+    stateBadge = `<span class="badge neutral">paid ${money(s.amount)}</span>`;
+  }
   return `
     <div class="session-row">
       <div>
-        <div>${esc(s.service_name || 'Session')} ${tag}</div>
+        <div>${esc(s.service_name || 'Session')}</div>
         <div class="sub">${s.session_date ? fmtDate(s.session_date) : (s.created_at ? fmtDate(s.created_at) : '')}${s.note ? ' · ' + esc(s.note) : ''}</div>
       </div>
       <div style="display:flex;gap:6px;align-items:center">
@@ -876,11 +888,18 @@ function sessionRowHtml(s) {
 }
 
 function packageRowHtml(p) {
+  const badge = p.payment_state === 'unpaid'
+    ? `<span class="badge unpaid">owed · ${money(p.price)}</span>`
+    : `<span class="badge neutral">paid ${money(p.price)}</span>`;
   return `
     <div class="session-row">
       <div>
         <div>${esc(p.name)}${p._pending ? ' <span class="pending-note">(pending sync)</span>' : ''}</div>
-        <div class="sub">${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} · ${money(p.price)} · ${fmtDate(p.sold_at || p.created_at)}</div>
+        <div class="sub">${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} · ${fmtDate(p.sold_at || p.created_at)}</div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        ${badge}
+        ${p.payment_state === 'unpaid' ? `<button class="btn secondary" style="padding:6px 10px;font-size:0.75rem" data-mark-paid-package="${p.id}">Mark paid</button>` : ''}
       </div>
     </div>`;
 }
@@ -1264,64 +1283,78 @@ function openEditPackageModal(p) {
   });
 }
 
-async function openLogSessionModal(clientId) {
-  const { data: services } = await api.listServices();
+// One screen for everything money-related on a client's page: recording that
+// they paid or owe for a session, using up a prepaid credit (which decrements
+// how many they have left), or giving them a fresh batch of credits — a mode
+// switch at the top swaps which fields show, instead of four separate flows
+// each asking for their own set of fields.
+async function openRecordPaymentModal(clientId, creditsAvailable) {
+  const [{ data: services }, { data: packages }] = await Promise.all([api.listServices(), api.listPackages()]);
+  const hasPresets = !!(packages && packages.length);
+  const modes = [
+    { key: 'paid', label: 'Paid' },
+    { key: 'owes', label: 'Owes' },
+    ...(creditsAvailable > 0 ? [{ key: 'credit', label: `Use a credit (${creditsAvailable} left)` }] : []),
+    { key: 'give', label: 'Give credits' },
+  ];
   openModal(`
-    <h3>Log session</h3>
-    <label>Service</label>
-    <select id="f-service"><option value="">— none / general —</option>${services.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
-    <label>Payment</label>
-    <select id="f-state">
-      <option value="prepaid">Prepaid credit (session paid in advance)</option>
-      <option value="unpaid">Unpaid (owes money)</option>
-      <option value="paid_now">Paid now (settle immediately)</option>
-    </select>
-    <label>Amount (optional for a plain credit/session, whole dollars only)</label>
-    <input id="f-amount" type="number" step="1" min="0" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 30" />
-    <label>Tag</label>
-    <select id="f-tag"><option value="">none</option><option value="ems">EMS</option><option value="presso">Presso Therapy</option><option value="kids">Kids training</option></select>
-    <label>Note</label><input id="f-note" placeholder="Optional" />
+    <h3>Record payment</h3>
+    <div class="segmented" id="rp-mode">
+      ${modes.map((m, i) => `<button data-mode="${m.key}" class="${i === 0 ? 'active' : ''}">${m.label}</button>`).join('')}
+    </div>
+
+    <div id="rp-session-fields">
+      <label>Service</label>
+      <select id="f-service"><option value="">— none / general —</option>${services.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+      <div id="rp-amount-wrap">
+        <label>Amount (whole dollars)</label>
+        <input id="f-amount" type="number" step="1" min="0" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 30" />
+      </div>
+      <button type="button" class="btn secondary" id="rp-note-toggle" style="margin:10px 0">+ Add note</button>
+      <div id="rp-note-wrap" style="display:none"><label>Note</label><input id="f-note" placeholder="Optional" /></div>
+    </div>
+
+    <div id="rp-give-fields" style="display:none">
+      ${hasPresets ? `
+      <label>Package</label>
+      <select id="f-package">
+        ${packages.map((p) => `<option value="${p.id}" data-name="${esc(p.name)}" data-count="${p.session_count}" data-price="${p.price}">${esc(p.name)} — ${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} for ${money(p.price)}</option>`).join('')}
+        <option value="custom">Custom…</option>
+      </select>
+      ` : `<div class="sub" style="margin-bottom:10px;line-height:1.45">No saved packages yet — set some up in ⚙ Settings → Session packages, or give a one-off below.</div>`}
+      <div id="f-custom-fields" style="${hasPresets ? 'display:none' : ''}">
+        <label>Name</label><input id="f-give-name" placeholder="e.g. 6-session pack" />
+        <label>Number of sessions</label><input id="f-count" type="number" min="1" step="1" placeholder="e.g. 6" />
+        <label>Price</label><input id="f-price" type="number" min="0" step="0.01" placeholder="e.g. 250" />
+      </div>
+      <label>Has the client paid?</label>
+      <div class="segmented" id="rp-give-paid">
+        <button data-paid="yes" class="active">Paid</button>
+        <button data-paid="no">Owes</button>
+      </div>
+      <label>Note</label><input id="f-give-note" placeholder="Optional" />
+    </div>
+
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
-  guardedClick('f-save', async () => {
-    const amountRaw = document.getElementById('f-amount').value;
-    const amount = amountRaw ? Math.round(Number(amountRaw)) : null;
-    if (amount !== null && (Number.isNaN(amount) || amount < 0)) {
-      alert('Amount must be a whole number, 0 or more.');
-      return;
-    }
-    await api.logSession(clientId, {
-      service_id: document.getElementById('f-service').value || null,
-      payment_state: document.getElementById('f-state').value,
-      amount,
-      tag: document.getElementById('f-tag').value || null,
-      note: document.getElementById('f-note').value.trim() || null,
-    });
-    closeModal();
-    renderClientDetail(clientId);
-  });
-}
 
-async function openSellPackageModal(clientId) {
-  const { data: packages } = await api.listPackages();
-  const hasPresets = !!(packages && packages.length);
-  openModal(`
-    <h3>Sell a package</h3>
-    ${hasPresets ? `
-    <label>Package</label>
-    <select id="f-package">
-      ${packages.map((p) => `<option value="${p.id}" data-name="${esc(p.name)}" data-count="${p.session_count}" data-price="${p.price}">${esc(p.name)} — ${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} for ${money(p.price)}</option>`).join('')}
-      <option value="custom">Custom…</option>
-    </select>
-    ` : `<div class="sub" style="margin-bottom:10px;line-height:1.45">No saved packages yet — set some up in ⚙ Settings → Session packages, or sell a one-off below.</div>`}
-    <div id="f-custom-fields" style="${hasPresets ? 'display:none' : ''}">
-      <label>Name</label><input id="f-name" placeholder="e.g. 6-session pack" />
-      <label>Number of sessions</label><input id="f-count" type="number" min="1" step="1" placeholder="e.g. 6" />
-      <label>Price</label><input id="f-price" type="number" min="0" step="0.01" placeholder="e.g. 250" />
-    </div>
-    <label>Note</label><input id="f-note" placeholder="Optional" />
-    <div class="btn-row"><button class="btn block" id="f-save">Sell &amp; add credits</button></div>
-  `);
+  const modeBtns = document.querySelectorAll('#rp-mode button');
+  const sessionFields = document.getElementById('rp-session-fields');
+  const giveFields = document.getElementById('rp-give-fields');
+  const amountWrap = document.getElementById('rp-amount-wrap');
+  const setMode = (mode) => {
+    modeBtns.forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+    sessionFields.style.display = mode === 'give' ? 'none' : '';
+    giveFields.style.display = mode === 'give' ? '' : 'none';
+    amountWrap.style.display = mode === 'credit' ? 'none' : '';
+  };
+  modeBtns.forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+  document.getElementById('rp-note-toggle').addEventListener('click', (e) => {
+    document.getElementById('rp-note-wrap').style.display = '';
+    e.target.style.display = 'none';
+  });
+
   const packageSelect = document.getElementById('f-package');
   const customFields = document.getElementById('f-custom-fields');
   if (packageSelect) {
@@ -1329,28 +1362,58 @@ async function openSellPackageModal(clientId) {
       customFields.style.display = packageSelect.value === 'custom' ? '' : 'none';
     });
   }
+  document.querySelectorAll('#rp-give-paid button').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('#rp-give-paid button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+    });
+  });
+
   guardedClick('f-save', async () => {
-    let payload;
-    if (packageSelect && packageSelect.value !== 'custom') {
-      const opt = packageSelect.selectedOptions[0];
-      payload = {
-        package_id: Number(packageSelect.value),
-        name: opt.dataset.name,
-        session_count: Number(opt.dataset.count),
-        price: Number(opt.dataset.price),
-        note: document.getElementById('f-note').value.trim() || null,
-      };
+    const mode = document.querySelector('#rp-mode button.active').dataset.mode;
+    const serviceId = document.getElementById('f-service').value || null;
+    const note = document.getElementById('f-note').value.trim() || null;
+
+    if (mode === 'credit') {
+      await api.redeemCredit(clientId, { service_id: serviceId, note });
+    } else if (mode === 'give') {
+      let payload;
+      if (packageSelect && packageSelect.value !== 'custom') {
+        const opt = packageSelect.selectedOptions[0];
+        payload = {
+          package_id: Number(packageSelect.value),
+          name: opt.dataset.name,
+          session_count: Number(opt.dataset.count),
+          price: Number(opt.dataset.price),
+        };
+      } else {
+        const name = document.getElementById('f-give-name').value.trim();
+        const count = Number(document.getElementById('f-count').value);
+        const price = Number(document.getElementById('f-price').value);
+        if (!name || !Number.isFinite(count) || count <= 0 || !Number.isFinite(price) || price < 0) {
+          alert('Enter a name, a number of sessions (1 or more), and a price (0 or more).');
+          return;
+        }
+        payload = { name, session_count: Math.floor(count), price };
+      }
+      const paid = document.querySelector('#rp-give-paid button.active').dataset.paid === 'yes';
+      payload.payment_state = paid ? 'paid_now' : 'unpaid';
+      payload.note = document.getElementById('f-give-note').value.trim() || null;
+      await api.sellPackage(clientId, payload);
     } else {
-      const name = document.getElementById('f-name').value.trim();
-      const count = Number(document.getElementById('f-count').value);
-      const price = Number(document.getElementById('f-price').value);
-      if (!name || !Number.isFinite(count) || count <= 0 || !Number.isFinite(price) || price < 0) {
-        alert('Enter a name, a number of sessions (1 or more), and a price (0 or more).');
+      const amountRaw = document.getElementById('f-amount').value;
+      const amount = amountRaw ? Math.round(Number(amountRaw)) : null;
+      if (amount !== null && (Number.isNaN(amount) || amount < 0)) {
+        alert('Amount must be a whole number, 0 or more.');
         return;
       }
-      payload = { name, session_count: Math.floor(count), price, note: document.getElementById('f-note').value.trim() || null };
+      await api.recordPayment(clientId, {
+        service_id: serviceId,
+        payment_state: mode === 'paid' ? 'paid_now' : 'unpaid',
+        amount,
+        note,
+      });
     }
-    await api.sellPackage(clientId, payload);
     closeModal();
     renderClientDetail(clientId);
   });

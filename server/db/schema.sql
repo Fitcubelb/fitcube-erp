@@ -44,10 +44,14 @@ CREATE TABLE IF NOT EXISTS session_entries (
   session_date TEXT,                 -- nullable: legacy/imported entries may not have an exact date
   payment_state TEXT NOT NULL CHECK (payment_state IN ('prepaid','unpaid','paid_now')),
   amount REAL,                       -- amount owed (unpaid) or charged (paid_now); NULL when unknown/prepaid credit
-  tag TEXT,                          -- 'ems' | 'presso' | 'kids' | NULL
+  tag TEXT,                          -- 'ems' | 'presso' | 'kids' | NULL (legacy — no longer set from the app)
   note TEXT,
   source TEXT NOT NULL DEFAULT 'manual', -- 'manual' | 'legacy_import'
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Set when a prepaid credit row (payment_state='prepaid', amount NULL) is
+  -- redeemed for an actual visit — see POST /api/clients/:id/redeem-credit.
+  -- NULL means the credit is still available to use.
+  redeemed_at TEXT
 );
 
 -- Simple scheduled appointments (separate from the session log above, which
@@ -229,6 +233,10 @@ CREATE TABLE IF NOT EXISTS package_sales (
   name TEXT NOT NULL,
   session_count INTEGER NOT NULL,
   price REAL NOT NULL,
+  -- Whether the client has actually paid for this batch of credits yet.
+  -- Credits are granted immediately either way; only 'paid_now' sales count
+  -- as revenue, and 'unpaid' ones show up in the client's owed balance.
+  payment_state TEXT NOT NULL DEFAULT 'paid_now' CHECK (payment_state IN ('paid_now','unpaid')),
   sold_at TEXT NOT NULL DEFAULT (datetime('now')),
   note TEXT
 );

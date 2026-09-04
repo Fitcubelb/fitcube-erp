@@ -147,7 +147,7 @@ const api = {
     return result;
   },
 
-  async logSession(clientId, payload) {
+  async recordPayment(clientId, payload) {
     const result = await mutate('POST', `/api/clients/${clientId}/sessions`, payload);
     const id = result.offline ? `tmp_${Date.now()}` : result.data.id;
     let service_name = null;
@@ -160,6 +160,41 @@ const api = {
         { id, client_id: Number(clientId), created_at: new Date().toISOString(), service_name, _pending: result.offline, ...payload },
         ...(bundle.sessions || []),
       ];
+    });
+    return result;
+  },
+
+  // Redeems the client's oldest available prepaid credit for a visit — see
+  // POST /api/clients/:id/redeem-credit. Optimistically marks the oldest
+  // still-unredeemed credit in the cached bundle as used, the same way the
+  // server picks it, so it disappears from "credits left" immediately.
+  async redeemCredit(clientId, payload) {
+    const result = await mutate('POST', `/api/clients/${clientId}/redeem-credit`, payload);
+    let service_name = null;
+    if (payload.service_id) {
+      const svc = await idb.get('services', Number(payload.service_id));
+      service_name = svc ? svc.name : null;
+    }
+    await patchClientDetailCache(clientId, (bundle) => {
+      const sessions = bundle.sessions || [];
+      const idx = sessions
+        .filter((s) => s.payment_state === 'prepaid' && s.amount === null && !s.redeemed_at)
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0];
+      if (idx) {
+        bundle.sessions = sessions.map((s) =>
+          s === idx
+            ? {
+                ...s,
+                session_date: new Date().toISOString(),
+                service_id: payload.service_id || s.service_id,
+                service_name: service_name || s.service_name,
+                note: payload.note || s.note,
+                redeemed_at: new Date().toISOString(),
+                _pending: result.offline || s._pending,
+              }
+            : s
+        );
+      }
     });
     return result;
   },
@@ -431,13 +466,14 @@ const api = {
     return rawFetch('DELETE', `/api/packages/${id}`);
   },
 
-  // Selling a package: books the sale and grants session_count prepaid
+  // Giving a client credits: books the sale and grants session_count prepaid
   // credits in one call. Optimistically reflected in the cached client
-  // bundle the same way logSession is, so the new credits and the package
-  // itself show up on the client's page immediately, online or off.
+  // bundle the same way recordPayment is, so the new credits and the
+  // package itself show up on the client's page immediately, online or off.
   async sellPackage(clientId, payload) {
-    const result = await mutate('POST', `/api/clients/${clientId}/packages`, payload);
-    const count = Math.max(0, Math.floor(Number(payload.session_count) || 0));
+    const body = { payment_state: 'paid_now', ...payload };
+    const result = await mutate('POST', `/api/clients/${clientId}/packages`, body);
+    const count = Math.max(0, Math.floor(Number(body.session_count) || 0));
     const stamp = Date.now();
     await patchClientDetailCache(clientId, (bundle) => {
       const newCredits = Array.from({ length: count }, (_, i) => ({
@@ -445,7 +481,8 @@ const api = {
         client_id: Number(clientId),
         payment_state: 'prepaid',
         amount: null,
-        note: `Package: ${payload.name}`,
+        redeemed_at: null,
+        note: `Package: ${body.name}`,
         created_at: new Date().toISOString(),
         _pending: result.offline,
       }));
@@ -453,14 +490,25 @@ const api = {
       bundle.packages = [
         {
           id: result.offline ? `tmp_${stamp}` : (result.data && result.data.id),
-          name: payload.name,
+          name: body.name,
           session_count: count,
-          price: payload.price,
+          price: body.price,
+          payment_state: body.payment_state,
           sold_at: new Date().toISOString(),
           _pending: result.offline,
         },
         ...(bundle.packages || []),
       ];
+    });
+    return result;
+  },
+
+  async markPackagePaid(packageSaleId, clientId) {
+    const result = await mutate('PUT', `/api/package-sales/${packageSaleId}`, { payment_state: 'paid_now' });
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.packages = (bundle.packages || []).map((p) =>
+        String(p.id) === String(packageSaleId) ? { ...p, payment_state: 'paid_now', _pending: result.offline || p._pending } : p
+      );
     });
     return result;
   },
