@@ -246,21 +246,21 @@ async function renderDashboard() {
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
 
-    ${isOwner() && data.profit_periods ? `
-    <h2>Profit</h2>
-    <div class="card">
-      <div class="stat" style="color:var(--accent)">${money(data.profit_periods.all_time)}</div>
-      <div class="stat-label">Total profit, all time</div>
+    ${isOwner() && data.revenue_periods && data.profit_periods ? `
+    <h2>Revenue &amp; profit</h2>
+    <div class="grid-2">
+      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.revenue_periods.all_time)}</div><div class="stat-label">Total revenue, all time</div></div>
+      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.profit_periods.all_time)}</div><div class="stat-label">Total profit, all time</div></div>
     </div>
-    <div class="segmented" id="profit-period">
+    <div class="segmented" id="money-period">
       <button data-period="today" class="active">Today</button>
       <button data-period="this_week">This week</button>
       <button data-period="this_month">This month</button>
       <button data-period="this_year">This year</button>
     </div>
-    <div class="card">
-      <div class="stat" id="profit-period-value" style="color:var(--accent)">${money(data.profit_periods.today)}</div>
-      <div class="stat-label" id="profit-period-label">Profit — today</div>
+    <div class="grid-2">
+      <div class="card"><div class="stat" id="revenue-period-value" style="color:var(--accent)">${money(data.revenue_periods.today)}</div><div class="stat-label" id="revenue-period-label">Revenue — today</div></div>
+      <div class="card"><div class="stat" id="profit-period-value" style="color:var(--accent)">${money(data.profit_periods.today)}</div><div class="stat-label" id="profit-period-label">Profit — today</div></div>
     </div>
     ` : ''}
 
@@ -275,20 +275,24 @@ async function renderDashboard() {
   `;
   document.getElementById('manage-templates-btn').addEventListener('click', () => openTemplateManagerModal());
 
-  if (isOwner() && data.profit_periods) {
-    const periods = data.profit_periods;
+  if (isOwner() && data.revenue_periods && data.profit_periods) {
+    const revenuePeriods = data.revenue_periods;
+    const profitPeriods = data.profit_periods;
     const labels = {
-      today: 'Profit — today',
-      this_week: 'Profit — this week',
-      this_month: 'Profit — this month',
-      this_year: 'Profit — this year',
+      today: 'today',
+      this_week: 'this week',
+      this_month: 'this month',
+      this_year: 'this year',
     };
-    document.querySelectorAll('#profit-period button').forEach((btn) => {
+    document.querySelectorAll('#money-period button').forEach((btn) => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('#profit-period button').forEach((b) => b.classList.remove('active'));
+        document.querySelectorAll('#money-period button').forEach((b) => b.classList.remove('active'));
         btn.classList.add('active');
-        document.getElementById('profit-period-value').textContent = money(periods[btn.dataset.period]);
-        document.getElementById('profit-period-label').textContent = labels[btn.dataset.period];
+        const period = btn.dataset.period;
+        document.getElementById('revenue-period-value').textContent = money(revenuePeriods[period]);
+        document.getElementById('revenue-period-label').textContent = `Revenue — ${labels[period]}`;
+        document.getElementById('profit-period-value').textContent = money(profitPeriods[period]);
+        document.getElementById('profit-period-label').textContent = `Profit — ${labels[period]}`;
       });
     });
   }
@@ -319,6 +323,7 @@ async function renderAccounting() {
     <h2>Profit &amp; loss</h2>
     <div class="card">
       <div class="session-row"><div>Session revenue</div><div>${money(data.session_revenue_total)}</div></div>
+      <div class="session-row"><div>Package sales revenue</div><div>${money(data.package_revenue_total)}</div></div>
       <div class="session-row"><div>Product sales revenue</div><div>${money(data.product_revenue_total)}</div></div>
       <div class="session-row"><div>Cost of goods sold</div><div>${money(data.cogs_total)}</div></div>
       <div class="session-row"><div>Money spent restocking</div><div>${money(data.purchases_total)}</div></div>
@@ -518,7 +523,7 @@ async function restoreSnapshotConfirmed(id) {
   if (!confirm('This replaces ALL current data on the server with this automatic backup. This cannot be undone. Continue?')) return;
   try {
     const result = await api.restoreSnapshot(id);
-    for (const store of ['clients', 'services', 'products', 'appointments', 'meta']) {
+    for (const store of ['clients', 'services', 'products', 'appointments', 'meta', 'packages']) {
       await idb.clear(store);
     }
     alert('Restore complete: ' + result.restored.map((r) => `${r.table} (${r.count})`).join(', '));
@@ -725,6 +730,7 @@ async function renderClientDetail(id) {
   const appts = c.appointments || [];
   const photos = c.photos || [];
   const metrics = c.metrics || [];
+  const packages = c.packages || [];
   const unpaidTotal = sessions.filter((s) => s.payment_state === 'unpaid').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
   const unpaidNoAmt = sessions.filter((s) => s.payment_state === 'unpaid' && s.amount === null).length;
   const credits = sessions.filter((s) => s.payment_state === 'prepaid' && s.amount === null).length;
@@ -751,6 +757,7 @@ async function renderClientDetail(id) {
       <button class="btn block" id="log-session-btn">Log session</button>
       <button class="btn secondary block" id="add-appt-btn">Schedule</button>
     </div>
+    <button class="btn secondary block" id="sell-package-btn" style="margin-top:8px">Sell a package</button>
 
     <h2>Progress photos</h2>
     <div class="photo-strip" id="photo-strip">
@@ -779,6 +786,11 @@ async function renderClientDetail(id) {
       ${sessions.length ? sessions.map((s) => sessionRowHtml(s)).join('') : '<div class="empty">No sessions logged yet.</div>'}
     </div>
 
+    <h2>Packages sold</h2>
+    <div class="card">
+      ${packages.length ? packages.map((p) => packageRowHtml(p)).join('') : '<div class="empty">No packages sold to this client yet.</div>'}
+    </div>
+
     <h2>Appointments</h2>
     <div class="card">
       ${appts.length ? appts.map((a) => `
@@ -792,6 +804,7 @@ async function renderClientDetail(id) {
   document.getElementById('edit-client-btn').addEventListener('click', () => openEditClientModal(c));
   document.getElementById('log-session-btn').addEventListener('click', () => openLogSessionModal(c.id));
   document.getElementById('add-appt-btn').addEventListener('click', () => openAddAppointmentModal(c.id));
+  document.getElementById('sell-package-btn').addEventListener('click', () => openSellPackageModal(c.id));
   const remindBtn = document.getElementById('remind-btn');
   if (remindBtn) remindBtn.addEventListener('click', () => {
     const nextAppt = appts
@@ -858,6 +871,16 @@ function sessionRowHtml(s) {
         ${stateBadge}
         ${s.payment_state === 'unpaid' ? `<button class="btn secondary" style="padding:6px 10px;font-size:0.75rem" data-mark-paid="${s.id}">Mark paid</button>` : ''}
         <button class="btn danger" style="padding:6px 8px;font-size:0.75rem" data-remove-session="${s.id}">×</button>
+      </div>
+    </div>`;
+}
+
+function packageRowHtml(p) {
+  return `
+    <div class="session-row">
+      <div>
+        <div>${esc(p.name)}${p._pending ? ' <span class="pending-note">(pending sync)</span>' : ''}</div>
+        <div class="sub">${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} · ${money(p.price)} · ${fmtDate(p.sold_at || p.created_at)}</div>
       </div>
     </div>`;
 }
@@ -1187,6 +1210,60 @@ function openEditTemplateModal(t) {
   });
 }
 
+async function openPackageManagerModal() {
+  const { data: packages } = await api.listPackages();
+  openModal(`
+    <h3>Session packages</h3>
+    <div class="sub" style="margin-bottom:10px;line-height:1.45">Your own bundle pricing — e.g. 1 session for $30, 10 for $450, 12 for $500. Sell one from any client's page to add that many prepaid credits and book the sale as revenue.</div>
+    <div id="pkg-rows">${packages.length ? packages.map((p) => packageManageRowHtml(p)).join('') : '<div class="empty">No packages yet.</div>'}</div>
+    <button type="button" class="btn secondary block" id="pkg-new-btn" style="margin-top:10px">+ New package</button>
+  `);
+  document.querySelectorAll('[data-edit-pkg]').forEach((btn) => btn.addEventListener('click', () => {
+    const p = packages.find((x) => String(x.id) === btn.dataset.editPkg);
+    openEditPackageModal(p);
+  }));
+  document.querySelectorAll('[data-del-pkg]').forEach((btn) => btn.addEventListener('click', async () => {
+    if (!confirm('Delete this package? Past sales already made from it keep their own record, unaffected.')) return;
+    await api.deletePackage(btn.dataset.delPkg);
+    openPackageManagerModal();
+  }));
+  document.getElementById('pkg-new-btn').addEventListener('click', () => openEditPackageModal(null));
+}
+
+function packageManageRowHtml(p) {
+  return `
+    <div class="card" data-id="${p.id}">
+      <div style="font-weight:600;margin-bottom:4px">${esc(p.name)}</div>
+      <div class="sub" style="margin-bottom:8px">${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} for ${money(p.price)}</div>
+      <div class="btn-row">
+        <button class="btn secondary" data-edit-pkg="${p.id}" style="padding:6px 10px;font-size:0.78rem">Edit</button>
+        <button class="btn danger" data-del-pkg="${p.id}" style="padding:6px 10px;font-size:0.78rem">Delete</button>
+      </div>
+    </div>`;
+}
+
+function openEditPackageModal(p) {
+  openModal(`
+    <h3>${p ? 'Edit package' : 'New package'}</h3>
+    <label>Name</label><input id="f-name" value="${p ? esc(p.name) : ''}" placeholder="e.g. 12-session pack" />
+    <label>Number of sessions</label><input id="f-count" type="number" min="1" step="1" value="${p ? p.session_count : ''}" placeholder="e.g. 12" />
+    <label>Price</label><input id="f-price" type="number" min="0" step="0.01" value="${p ? p.price : ''}" placeholder="e.g. 500" />
+    <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
+  `);
+  guardedClick('f-save', async () => {
+    const name = document.getElementById('f-name').value.trim();
+    const count = Number(document.getElementById('f-count').value);
+    const price = Number(document.getElementById('f-price').value);
+    if (!name || !Number.isFinite(count) || count <= 0 || !Number.isFinite(price) || price < 0) {
+      alert('Enter a name, a number of sessions (1 or more), and a price (0 or more).');
+      return;
+    }
+    if (p) await api.updatePackage(p.id, { name, session_count: Math.floor(count), price });
+    else await api.createPackage({ name, session_count: Math.floor(count), price });
+    openPackageManagerModal();
+  });
+}
+
 async function openLogSessionModal(clientId) {
   const { data: services } = await api.listServices();
   openModal(`
@@ -1215,6 +1292,60 @@ async function openLogSessionModal(clientId) {
       tag: document.getElementById('f-tag').value || null,
       note: document.getElementById('f-note').value.trim() || null,
     });
+    closeModal();
+    renderClientDetail(clientId);
+  });
+}
+
+async function openSellPackageModal(clientId) {
+  const { data: packages } = await api.listPackages();
+  const hasPresets = !!(packages && packages.length);
+  openModal(`
+    <h3>Sell a package</h3>
+    ${hasPresets ? `
+    <label>Package</label>
+    <select id="f-package">
+      ${packages.map((p) => `<option value="${p.id}" data-name="${esc(p.name)}" data-count="${p.session_count}" data-price="${p.price}">${esc(p.name)} — ${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} for ${money(p.price)}</option>`).join('')}
+      <option value="custom">Custom…</option>
+    </select>
+    ` : `<div class="sub" style="margin-bottom:10px;line-height:1.45">No saved packages yet — set some up in ⚙ Settings → Session packages, or sell a one-off below.</div>`}
+    <div id="f-custom-fields" style="${hasPresets ? 'display:none' : ''}">
+      <label>Name</label><input id="f-name" placeholder="e.g. 6-session pack" />
+      <label>Number of sessions</label><input id="f-count" type="number" min="1" step="1" placeholder="e.g. 6" />
+      <label>Price</label><input id="f-price" type="number" min="0" step="0.01" placeholder="e.g. 250" />
+    </div>
+    <label>Note</label><input id="f-note" placeholder="Optional" />
+    <div class="btn-row"><button class="btn block" id="f-save">Sell &amp; add credits</button></div>
+  `);
+  const packageSelect = document.getElementById('f-package');
+  const customFields = document.getElementById('f-custom-fields');
+  if (packageSelect) {
+    packageSelect.addEventListener('change', () => {
+      customFields.style.display = packageSelect.value === 'custom' ? '' : 'none';
+    });
+  }
+  guardedClick('f-save', async () => {
+    let payload;
+    if (packageSelect && packageSelect.value !== 'custom') {
+      const opt = packageSelect.selectedOptions[0];
+      payload = {
+        package_id: Number(packageSelect.value),
+        name: opt.dataset.name,
+        session_count: Number(opt.dataset.count),
+        price: Number(opt.dataset.price),
+        note: document.getElementById('f-note').value.trim() || null,
+      };
+    } else {
+      const name = document.getElementById('f-name').value.trim();
+      const count = Number(document.getElementById('f-count').value);
+      const price = Number(document.getElementById('f-price').value);
+      if (!name || !Number.isFinite(count) || count <= 0 || !Number.isFinite(price) || price < 0) {
+        alert('Enter a name, a number of sessions (1 or more), and a price (0 or more).');
+        return;
+      }
+      payload = { name, session_count: Math.floor(count), price, note: document.getElementById('f-note').value.trim() || null };
+    }
+    await api.sellPackage(clientId, payload);
     closeModal();
     renderClientDetail(clientId);
   });
@@ -1908,6 +2039,12 @@ async function renderSettings() {
     </div>
     ` : ''}
 
+    <h2>Session packages</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px;line-height:1.45">Set your own bundle pricing — e.g. 1 session for $30, 10 for $450, 12 for $500. Sell one from any client's page to add that many prepaid credits and book the sale as revenue.</div>
+      <button class="btn secondary block" id="set-manage-packages">Manage session packages</button>
+    </div>
+
     <h2>Message templates</h2>
     <div class="card">
       <div class="sub" style="margin-bottom:12px">The wording used for payment and session reminders.</div>
@@ -1918,6 +2055,7 @@ async function renderSettings() {
   document.getElementById('set-password').addEventListener('click', openChangePasswordModal);
   document.getElementById('set-signout').addEventListener('click', signOut);
   document.getElementById('set-templates').addEventListener('click', () => openTemplateManagerModal());
+  document.getElementById('set-manage-packages').addEventListener('click', () => openPackageManagerModal());
   if (!owner) return;
 
   document.getElementById('set-accounting').addEventListener('click', () => { location.hash = '#/accounting'; });
@@ -1948,7 +2086,7 @@ async function renderSettings() {
       const text = await file.text();
       const dump = JSON.parse(text);
       const result = await api.restoreBackup(dump);
-      for (const store of ['clients', 'services', 'products', 'appointments', 'meta']) {
+      for (const store of ['clients', 'services', 'products', 'appointments', 'meta', 'packages']) {
         await idb.clear(store);
       }
       alert('Restore complete: ' + result.restored.map((r) => `${r.table} (${r.count})`).join(', '));

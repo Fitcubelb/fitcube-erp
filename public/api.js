@@ -128,7 +128,7 @@ const api = {
     // viewed offline in the same visit, before any sync has fetched it.
     await idb.put('meta', {
       key: `client_detail_${id}`,
-      value: { id, archived: 0, sessions: [], appointments: [], photos: [], metrics: [], _pending: result.offline, ...payload },
+      value: { id, archived: 0, sessions: [], appointments: [], photos: [], metrics: [], packages: [], _pending: result.offline, ...payload },
     });
     return { id, offline: result.offline };
   },
@@ -408,6 +408,61 @@ const api = {
     // Same reasoning as restoreBackup — only makes sense against the live
     // server, never queued for offline replay.
     return rawFetch('POST', `/api/backup/snapshots/${id}/restore`, {});
+  },
+
+  // ---------- session packages (bundles) ----------
+
+  async listPackages() {
+    try {
+      const data = await get('/api/packages');
+      await idb.putAll('packages', data);
+      return { data, fromCache: false };
+    } catch {
+      return { data: await idb.getAll('packages'), fromCache: true };
+    }
+  },
+  async createPackage(payload) {
+    return rawFetch('POST', '/api/packages', payload);
+  },
+  async updatePackage(id, payload) {
+    return rawFetch('PUT', `/api/packages/${id}`, payload);
+  },
+  async deletePackage(id) {
+    return rawFetch('DELETE', `/api/packages/${id}`);
+  },
+
+  // Selling a package: books the sale and grants session_count prepaid
+  // credits in one call. Optimistically reflected in the cached client
+  // bundle the same way logSession is, so the new credits and the package
+  // itself show up on the client's page immediately, online or off.
+  async sellPackage(clientId, payload) {
+    const result = await mutate('POST', `/api/clients/${clientId}/packages`, payload);
+    const count = Math.max(0, Math.floor(Number(payload.session_count) || 0));
+    const stamp = Date.now();
+    await patchClientDetailCache(clientId, (bundle) => {
+      const newCredits = Array.from({ length: count }, (_, i) => ({
+        id: result.offline ? `tmp_pkg_${stamp}_${i}` : `pkg_${stamp}_${i}`,
+        client_id: Number(clientId),
+        payment_state: 'prepaid',
+        amount: null,
+        note: `Package: ${payload.name}`,
+        created_at: new Date().toISOString(),
+        _pending: result.offline,
+      }));
+      bundle.sessions = [...newCredits, ...(bundle.sessions || [])];
+      bundle.packages = [
+        {
+          id: result.offline ? `tmp_${stamp}` : (result.data && result.data.id),
+          name: payload.name,
+          session_count: count,
+          price: payload.price,
+          sold_at: new Date().toISOString(),
+          _pending: result.offline,
+        },
+        ...(bundle.packages || []),
+      ];
+    });
+    return result;
   },
 
   async dashboardSummary() {

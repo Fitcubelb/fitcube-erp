@@ -2,8 +2,8 @@
 // dependency-free). Holds a local mirror of server data so the app can be
 // viewed offline, plus an "outbox" of queued writes made while offline.
 const DB_NAME = 'fitcube-erp';
-const DB_VERSION = 2;
-const STORES = ['clients', 'services', 'products', 'appointments', 'meta', 'outbox', 'templates'];
+const DB_VERSION = 3;
+const STORES = ['clients', 'services', 'products', 'appointments', 'meta', 'outbox', 'templates', 'packages'];
 
 let dbPromise = null;
 
@@ -20,6 +20,7 @@ function openDb() {
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
       if (!db.objectStoreNames.contains('outbox')) db.createObjectStore('outbox', { keyPath: 'id', autoIncrement: true });
       if (!db.objectStoreNames.contains('templates')) db.createObjectStore('templates', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('packages')) db.createObjectStore('packages', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);

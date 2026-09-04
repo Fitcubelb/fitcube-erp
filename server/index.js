@@ -394,7 +394,13 @@ app.get('/api/clients/:id', async (req, res) => {
       args: [req.params.id],
     })
   ).rows;
-  ok(res, { ...client, sessions, appointments, photos, metrics });
+  const packages = (
+    await db.execute({
+      sql: `SELECT * FROM package_sales WHERE client_id=? ORDER BY sold_at DESC, id DESC`,
+      args: [req.params.id],
+    })
+  ).rows;
+  ok(res, { ...client, sessions, appointments, photos, metrics, packages });
 });
 
 app.post('/api/clients', async (req, res) => {
@@ -701,6 +707,90 @@ app.put('/api/products/:id', async (req, res) => {
   ok(res, { ok: true });
 });
 
+// ---------- Session packages (bundles) ----------
+// Anthony's own pricing for bulk session credits — "1 session" for $30,
+// "10-pack" for $450, "12-pack" for $500, however he wants to price them.
+// Selling one (below) books the price as revenue and adds that many prepaid
+// session credits to the client in one step.
+
+app.get('/api/packages', async (req, res) => {
+  const rows = (await db.execute('SELECT * FROM session_packages ORDER BY session_count ASC, id ASC')).rows;
+  ok(res, rows);
+});
+
+app.post('/api/packages', async (req, res) => {
+  const { name, session_count, price } = req.body || {};
+  if (!name || !String(name).trim()) return bad(res, 'name is required');
+  const count = Number(session_count);
+  if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) return bad(res, 'session_count must be a whole number of 1 or more');
+  const priceNum = Number(price);
+  if (!Number.isFinite(priceNum) || priceNum < 0) return bad(res, 'price must be 0 or more');
+  const r = await db.execute({
+    sql: 'INSERT INTO session_packages (name, session_count, price) VALUES (?, ?, ?)',
+    args: [String(name).trim(), count, priceNum],
+  });
+  ok(res, { id: Number(r.lastInsertRowid) });
+});
+
+app.put('/api/packages/:id', async (req, res) => {
+  const { name, session_count, price } = req.body || {};
+  if (session_count !== undefined && session_count !== null) {
+    const count = Number(session_count);
+    if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) return bad(res, 'session_count must be a whole number of 1 or more');
+  }
+  if (price !== undefined && price !== null) {
+    const priceNum = Number(price);
+    if (!Number.isFinite(priceNum) || priceNum < 0) return bad(res, 'price must be 0 or more');
+  }
+  await db.execute({
+    sql: `UPDATE session_packages SET
+            name = COALESCE(?, name), session_count = COALESCE(?, session_count), price = COALESCE(?, price)
+          WHERE id=?`,
+    args: [name ?? null, session_count ?? null, price ?? null, req.params.id],
+  });
+  ok(res, { ok: true });
+});
+
+app.delete('/api/packages/:id', async (req, res) => {
+  // Deleting a preset never touches past sales made from it — package_sales
+  // snapshots name/session_count/price at sale time, and its package_id
+  // reference just goes to NULL (see schema.sql).
+  await db.execute({ sql: 'DELETE FROM session_packages WHERE id=?', args: [req.params.id] });
+  ok(res, { ok: true });
+});
+
+// Selling a package to a client: records the sale (for revenue reporting)
+// and grants session_count prepaid credits — the same session_entries shape
+// as logging a plain prepaid session (payment_state='prepaid', amount NULL)
+// one at a time, just done in bulk. name/session_count/price come from the
+// client already resolved (either copied from a chosen preset or entered as
+// a one-off), so this route trusts them rather than re-deriving from
+// package_id — the same way /api/sales trusts the unit_price it's given.
+app.post('/api/clients/:id/packages', async (req, res) => {
+  const { package_id, name, session_count, price, note } = req.body || {};
+  if (!name || !String(name).trim()) return bad(res, 'name is required');
+  const count = Number(session_count);
+  if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) return bad(res, 'session_count must be a whole number of 1 or more');
+  const priceNum = Number(price);
+  if (!Number.isFinite(priceNum) || priceNum < 0) return bad(res, 'price must be 0 or more');
+
+  const client = (await db.execute({ sql: 'SELECT id FROM clients WHERE id=?', args: [req.params.id] })).rows[0];
+  if (!client) return bad(res, 'Client not found', 404);
+
+  const trimmedName = String(name).trim();
+  const saleRes = await db.execute({
+    sql: 'INSERT INTO package_sales (client_id, package_id, name, session_count, price, note) VALUES (?, ?, ?, ?, ?, ?)',
+    args: [req.params.id, package_id || null, trimmedName, count, priceNum, note || null],
+  });
+  for (let i = 0; i < count; i++) {
+    await db.execute({
+      sql: `INSERT INTO session_entries (client_id, payment_state, amount, note, source) VALUES (?, 'prepaid', NULL, ?, 'manual')`,
+      args: [req.params.id, `Package: ${trimmedName}`],
+    });
+  }
+  ok(res, { id: Number(saleRes.lastInsertRowid), credits_added: count });
+});
+
 // ---------- Sales ----------
 
 app.get('/api/sales', async (req, res) => {
@@ -825,6 +915,7 @@ app.get('/api/dashboard/summary', async (req, res) => {
   const clientCount = (await db.execute('SELECT COUNT(*) as n FROM clients WHERE archived=0')).rows[0];
   const sessionRevenue = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL`)).rows[0];
   const productRevenue = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM sales')).rows[0];
+  const packageRevenue = (await db.execute('SELECT COALESCE(SUM(price),0) as total FROM package_sales')).rows[0];
   // Cost of goods sold: what the products actually sold cost you, valued at
   // each product's current cost price (this app doesn't snapshot historical
   // cost per sale, so if you change a cost price, past COGS re-values too —
@@ -837,7 +928,7 @@ app.get('/api/dashboard/summary', async (req, res) => {
   ).rows[0];
   const purchasesTotal = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM purchases')).rows[0];
   const inventoryValue = (await db.execute('SELECT COALESCE(SUM(qty_on_hand * cost_price),0) as total FROM products')).rows[0];
-  const revenueTotal = Number(sessionRevenue.total) + Number(productRevenue.total);
+  const revenueTotal = Number(sessionRevenue.total) + Number(productRevenue.total) + Number(packageRevenue.total);
   const summary = {
     unpaid_total: Number(unpaid.total),
     unpaid_entries: Number(unpaid.n),
@@ -850,15 +941,18 @@ app.get('/api/dashboard/summary', async (req, res) => {
   // operational numbers they need and nothing about takings or margin —
   // withheld here on the server, not merely hidden in the app.
   if (req.user.role === 'owner') {
+    const money = await moneyByPeriod();
     Object.assign(summary, {
       revenue_total: revenueTotal,
       session_revenue_total: Number(sessionRevenue.total),
       product_revenue_total: Number(productRevenue.total),
+      package_revenue_total: Number(packageRevenue.total),
       cogs_total: Number(cogs.total),
       gross_profit: revenueTotal - Number(cogs.total),
       purchases_total: Number(purchasesTotal.total),
       inventory_value: Number(inventoryValue.total),
-      profit_periods: await profitByPeriod(),
+      revenue_periods: money.revenue,
+      profit_periods: money.profit,
     });
   }
   ok(res, summary);
@@ -869,45 +963,46 @@ app.get('/api/dashboard/summary', async (req, res) => {
 // week, this month, this year, and all time — one query per money source, each
 // bucketing all five periods at once with conditional SUMs rather than
 // running the same query five times over.
-async function profitByPeriod() {
-  const revenue = (
+const MONEY_PERIODS = ['all_time', 'today', 'this_week', 'this_month', 'this_year'];
+
+// One CASE-per-period bucketing per money source (rather than one query per
+// period) so this stays cheap regardless of how many periods the UI wants.
+function periodCase(dateExpr, valueExpr) {
+  return `
+        COALESCE(SUM(${valueExpr}), 0) as all_time,
+        COALESCE(SUM(CASE WHEN date(${dateExpr}) = date('now') THEN ${valueExpr} ELSE 0 END), 0) as today,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%W', ${dateExpr}) = strftime('%Y-%W', 'now') THEN ${valueExpr} ELSE 0 END), 0) as this_week,
+        COALESCE(SUM(CASE WHEN strftime('%Y-%m', ${dateExpr}) = strftime('%Y-%m', 'now') THEN ${valueExpr} ELSE 0 END), 0) as this_month,
+        COALESCE(SUM(CASE WHEN strftime('%Y', ${dateExpr}) = strftime('%Y', 'now') THEN ${valueExpr} ELSE 0 END), 0) as this_year`;
+}
+
+async function moneyByPeriod() {
+  const sessionRevenue = (
     await db.execute(`
-      SELECT
-        COALESCE(SUM(amount), 0) as all_time,
-        COALESCE(SUM(CASE WHEN date(COALESCE(session_date, created_at)) = date('now') THEN amount ELSE 0 END), 0) as today,
-        COALESCE(SUM(CASE WHEN strftime('%Y-%W', COALESCE(session_date, created_at)) = strftime('%Y-%W', 'now') THEN amount ELSE 0 END), 0) as this_week,
-        COALESCE(SUM(CASE WHEN strftime('%Y-%m', COALESCE(session_date, created_at)) = strftime('%Y-%m', 'now') THEN amount ELSE 0 END), 0) as this_month,
-        COALESCE(SUM(CASE WHEN strftime('%Y', COALESCE(session_date, created_at)) = strftime('%Y', 'now') THEN amount ELSE 0 END), 0) as this_year
+      SELECT ${periodCase('COALESCE(session_date, created_at)', 'amount')}
       FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL
     `)
   ).rows[0];
-  const sales = (
-    await db.execute(`
-      SELECT
-        COALESCE(SUM(total), 0) as all_time,
-        COALESCE(SUM(CASE WHEN date(sale_date) = date('now') THEN total ELSE 0 END), 0) as today,
-        COALESCE(SUM(CASE WHEN strftime('%Y-%W', sale_date) = strftime('%Y-%W', 'now') THEN total ELSE 0 END), 0) as this_week,
-        COALESCE(SUM(CASE WHEN strftime('%Y-%m', sale_date) = strftime('%Y-%m', 'now') THEN total ELSE 0 END), 0) as this_month,
-        COALESCE(SUM(CASE WHEN strftime('%Y', sale_date) = strftime('%Y', 'now') THEN total ELSE 0 END), 0) as this_year
-      FROM sales
-    `)
+  const salesRevenue = (
+    await db.execute(`SELECT ${periodCase('sale_date', 'total')} FROM sales`)
+  ).rows[0];
+  const packageRevenue = (
+    await db.execute(`SELECT ${periodCase('sold_at', 'price')} FROM package_sales`)
   ).rows[0];
   const cogsByPeriod = (
     await db.execute(`
-      SELECT
-        COALESCE(SUM(si.qty * p.cost_price), 0) as all_time,
-        COALESCE(SUM(CASE WHEN date(s.sale_date) = date('now') THEN si.qty * p.cost_price ELSE 0 END), 0) as today,
-        COALESCE(SUM(CASE WHEN strftime('%Y-%W', s.sale_date) = strftime('%Y-%W', 'now') THEN si.qty * p.cost_price ELSE 0 END), 0) as this_week,
-        COALESCE(SUM(CASE WHEN strftime('%Y-%m', s.sale_date) = strftime('%Y-%m', 'now') THEN si.qty * p.cost_price ELSE 0 END), 0) as this_month,
-        COALESCE(SUM(CASE WHEN strftime('%Y', s.sale_date) = strftime('%Y', 'now') THEN si.qty * p.cost_price ELSE 0 END), 0) as this_year
+      SELECT ${periodCase('s.sale_date', 'si.qty * p.cost_price')}
       FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN products p ON p.id = si.product_id
     `)
   ).rows[0];
-  const periods = {};
-  for (const p of ['all_time', 'today', 'this_week', 'this_month', 'this_year']) {
-    periods[p] = Number(revenue[p]) + Number(sales[p]) - Number(cogsByPeriod[p]);
+  const revenue = {};
+  const profit = {};
+  for (const p of MONEY_PERIODS) {
+    const rev = Number(sessionRevenue[p]) + Number(salesRevenue[p]) + Number(packageRevenue[p]);
+    revenue[p] = rev;
+    profit[p] = rev - Number(cogsByPeriod[p]);
   }
-  return periods;
+  return { revenue, profit };
 }
 
 // ---------- Reports ----------
@@ -949,8 +1044,8 @@ app.get('/api/reports/revenue', requireOwner, async (req, res) => {
 // filesystem, hosting free tier, even Turso) is a "should be fine" — this is
 // a "definitely fine" that lives wherever Anthony puts the downloaded file.
 
-const BACKUP_TABLES = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
-const BACKUP_INSERT_ORDER = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+const BACKUP_TABLES = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_packages', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items', 'package_sales'];
+const BACKUP_INSERT_ORDER = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_packages', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items', 'package_sales'];
 const BACKUP_DELETE_ORDER = [...BACKUP_INSERT_ORDER].reverse(); // children before parents
 
 app.get('/api/backup/export', requireOwner, async (req, res) => {

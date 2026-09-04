@@ -208,6 +208,31 @@ CREATE TABLE IF NOT EXISTS request_log (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Bundle pricing Anthony sets himself — e.g. "1 session" for $30, "10-pack"
+-- for $450, "12-pack" for $500 — offered when selling a package to a client.
+CREATE TABLE IF NOT EXISTS session_packages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  session_count INTEGER NOT NULL,
+  price REAL NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per package sold to a client: books the price as revenue and is
+-- the record of how many prepaid session credits (see session_entries) that
+-- purchase granted. Name/session_count/price are snapshotted at sale time so
+-- editing or deleting a session_packages preset later never rewrites history.
+CREATE TABLE IF NOT EXISTS package_sales (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  package_id INTEGER REFERENCES session_packages(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  session_count INTEGER NOT NULL,
+  price REAL NOT NULL,
+  sold_at TEXT NOT NULL DEFAULT (datetime('now')),
+  note TEXT
+);
+
 -- A second, automatic safety net alongside the manual "Save backup" flow in
 -- Settings. The server takes a full snapshot of the database roughly once a
 -- day (see maybeCreateSnapshot in server/index.js) and keeps a rolling window
@@ -225,3 +250,4 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_log_created ON activity_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_request_log_created ON request_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_backup_snapshots_created ON backup_snapshots(created_at);
+CREATE INDEX IF NOT EXISTS idx_package_sales_client ON package_sales(client_id);
