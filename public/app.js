@@ -173,6 +173,7 @@ async function render() {
   if (route === 'schedule') return renderSchedule();
   if (route === 'inventory') return renderInventory();
   if (route === 'sales') return renderSales();
+  if (route === 'settings') return renderSettings();
   return renderDashboard();
 }
 // Leaving the current screen should dismiss whatever sheet is open (and
@@ -225,45 +226,8 @@ async function renderDashboard() {
       <button class="btn secondary block" id="manage-templates-btn">Message templates</button>
     </div>
 
-    ${isOwner() ? `
-    <h2>Data &amp; backup</h2>
-    <div class="card">
-      <div class="sub" style="margin-bottom:10px">${backupStatusLine()}</div>
-      <div class="btn-row">
-        <button class="btn block" id="save-backup-btn">Save backup</button>
-        <button class="btn secondary block" id="restore-backup-btn">Restore from backup</button>
-      </div>
-      <div class="sub" style="margin-top:10px;line-height:1.45">"Save backup" opens your phone's share sheet — choose <b>Save to Files</b> to keep a copy on the phone itself, or <b>Google Drive</b> to put it in your Drive. Doing both takes about ten seconds.</div>
-      <input type="file" id="restore-file-input" accept="application/json" style="display:none" />
-    </div>
-    ` : ''}
   `;
   document.getElementById('manage-templates-btn').addEventListener('click', () => openTemplateManagerModal());
-  if (!isOwner()) return;
-  document.getElementById('save-backup-btn').addEventListener('click', (e) => prepareBackup(e.currentTarget));
-  document.getElementById('restore-backup-btn').addEventListener('click', () => {
-    document.getElementById('restore-file-input').click();
-  });
-  document.getElementById('restore-file-input').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (!confirm('This replaces ALL current data on the server with the contents of this backup file. This cannot be undone. Continue?')) {
-      e.target.value = '';
-      return;
-    }
-    try {
-      const text = await file.text();
-      const dump = JSON.parse(text);
-      const result = await api.restoreBackup(dump);
-      for (const store of ['clients', 'services', 'products', 'appointments', 'meta']) {
-        await idb.clear(store);
-      }
-      alert('Restore complete: ' + result.restored.map((r) => `${r.table} (${r.count})`).join(', '));
-      location.reload();
-    } catch (err) {
-      alert('Restore failed: ' + err.message + '\n\nMake sure you selected a Fit Cube backup .json file, and that you have an internet connection (restore only works online).');
-    }
-  });
 }
 
 // ---------- backups ----------
@@ -287,6 +251,9 @@ function markBackupSaved() {
   } catch (err) {
     // private mode / storage disabled — the backup still saved, just untracked
   }
+  // Refresh the screen showing "Last backup: …" so it reflects what just
+  // happened instead of waiting for the next visit.
+  if (currentRoute().route === 'settings') renderSettings();
 }
 function daysSinceBackup() {
   const at = lastBackupAt();
@@ -304,9 +271,12 @@ function backupNudgeHtml() {
   const days = daysSinceBackup();
   if (days !== null && days < BACKUP_STALE_DAYS) return '';
   const msg = days === null
-    ? 'No backup saved yet — scroll down to Data &amp; backup and save one to your phone and Drive.'
-    : `It's been ${days} days since your last backup — scroll down to Data &amp; backup and save a fresh one.`;
-  return `<div class="card" style="border-color:var(--unpaid)">⚠ ${msg}</div>`;
+    ? 'No backup saved yet — save one to your phone and Drive.'
+    : `It's been ${days} days since your last backup — time for a fresh one.`;
+  return `<div class="card" style="border-color:var(--unpaid)">
+    <div style="margin-bottom:10px">⚠ ${msg}</div>
+    <button class="btn secondary block" onclick="location.hash='#/settings'">Open Data &amp; backup</button>
+  </div>`;
 }
 
 let pendingBackup = null;
@@ -509,6 +479,12 @@ const CLIPBOARD_READ_SUPPORTED = !!(navigator.clipboard && navigator.clipboard.r
 const CONTACT_TIP_HTML = CONTACT_PICKER_SUPPORTED
   ? ''
   : `<div class="sub" style="margin-top:8px;line-height:1.45">On iPhone: tap the Name or Phone box and choose <b>AutoFill Contact</b> above the keyboard to pull a contact in. (Needs Settings → Safari → AutoFill → Contact Info switched on.) Or copy the number in Contacts and use the Paste button.</div>`;
+
+// Used where there's no paste button to point at — editing an existing client,
+// where the number is usually already filled in and only needs a correction.
+const AUTOFILL_ONLY_TIP_HTML = CONTACT_PICKER_SUPPORTED
+  ? ''
+  : `<div class="sub" style="margin-top:8px;line-height:1.45">On iPhone: tap the Name or Phone box and choose <b>AutoFill Contact</b> above the keyboard to pull a number from your contacts.</div>`;
 
 // Renders the button that fills a phone field from the address book. Call
 // contactPickerButtonHtml() where the button should render, then
@@ -733,14 +709,13 @@ function sessionRowHtml(s) {
 function openEditClientModal(c) {
   openModal(`
     <h3>Edit ${esc(c.name)}</h3>
-    ${contactPickerButtonHtml('pick-contact-btn')}
     <form id="f-contact-form" autocomplete="on" onsubmit="event.preventDefault()">
       <label>Name</label>
       <input id="f-name" name="name" value="${esc(c.name)}" autocomplete="name" />
       <label>Phone</label>
       <input id="f-phone" name="tel" value="${esc(c.phone || '')}" type="tel" autocomplete="tel" placeholder="70 123 456" />
     </form>
-    ${CONTACT_TIP_HTML}
+    ${AUTOFILL_ONLY_TIP_HTML}
     <label>Notes</label><textarea id="f-notes">${esc(c.notes || '')}</textarea>
     <label>Goal</label>
     <input id="f-goal" value="${esc(c.goal || '')}" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
@@ -751,7 +726,6 @@ function openEditClientModal(c) {
       <button class="btn danger" id="f-archive">Archive client</button>
     </div>
   `);
-  wireContactPicker('pick-contact-btn', 'f-phone', null);
   document.getElementById('f-save').addEventListener('click', async () => {
     const name = document.getElementById('f-name').value.trim();
     if (!name) { alert('Name is required.'); return; }
@@ -1710,21 +1684,112 @@ window.addEventListener('fitcube:unauthorized', () => {
   renderLoginScreen('Your session ended. Please sign in again.');
 });
 
-function openAccountModal() {
-  openModal(`
-    <h3>${esc(currentUser ? currentUser.display_name : 'Account')}</h3>
-    <div class="sub" style="margin-bottom:12px">Signed in as ${esc(currentUser ? currentUser.username : '')} · ${currentUser && currentUser.role === 'owner' ? 'Owner' : 'Staff'}</div>
-    <button class="btn secondary block" id="a-password" style="margin-bottom:8px">Change my password</button>
-    ${isOwner() ? `<button class="btn secondary block" id="a-staff" style="margin-bottom:8px">Staff &amp; access</button>
-    <button class="btn secondary block" id="a-activity" style="margin-bottom:8px">Recent activity</button>` : ''}
-    <button class="btn danger block" id="a-signout">Sign out</button>
-  `);
-  document.getElementById('a-password').addEventListener('click', openChangePasswordModal);
-  document.getElementById('a-signout').addEventListener('click', signOut);
-  const staffBtn = document.getElementById('a-staff');
-  if (staffBtn) staffBtn.addEventListener('click', openStaffModal);
-  const actBtn = document.getElementById('a-activity');
-  if (actBtn) actBtn.addEventListener('click', openActivityModal);
+// ---------- settings ----------
+
+async function renderSettings() {
+  const owner = isOwner();
+  viewEl.innerHTML = `<h1>Settings</h1><div class="empty">Loading…</div>`;
+
+  let users = null;
+  let usersError = null;
+  if (owner) {
+    try {
+      users = await api.listUsers();
+    } catch (err) {
+      usersError = err.message;
+    }
+  }
+
+  viewEl.innerHTML = `
+    <h1>Settings</h1>
+
+    <h2>Your account</h2>
+    <div class="card">
+      <div style="margin-bottom:2px">${esc(currentUser ? currentUser.display_name : '')}</div>
+      <div class="sub" style="margin-bottom:12px">${esc(currentUser ? currentUser.username : '')} · ${owner ? 'Owner' : 'Staff'}</div>
+      <button class="btn secondary block" id="set-password" style="margin-bottom:8px">Change my password</button>
+      <button class="btn danger block" id="set-signout">Sign out</button>
+    </div>
+
+    ${owner ? `
+    <h2>Staff &amp; access</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px;line-height:1.45">Staff can run clients, sessions, schedule, stock and sales. They can't see revenue or profit, take backups, or manage accounts.</div>
+      ${usersError ? `<div class="empty">${esc(usersError)}</div>` : (users || []).map((u) => `
+        <div class="session-row">
+          <div>
+            <div>${esc(u.display_name)}${u.active ? '' : ' <span class="tag-chip">suspended</span>'}</div>
+            <div class="sub">${esc(u.username)} · ${u.role === 'owner' ? 'Owner' : 'Staff'}${u.last_login_at ? ` · last in ${fmtDate(u.last_login_at)}` : ' · never signed in'}</div>
+          </div>
+          ${u.role === 'owner' ? '' : `<button class="btn secondary" data-manage="${u.id}" style="padding:6px 10px;font-size:0.78rem">Manage</button>`}
+        </div>
+      `).join('')}
+      <button class="btn block" id="set-add-staff" style="margin-top:12px">Add a staff account</button>
+    </div>
+
+    <h2>Data &amp; backup</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:10px">${backupStatusLine()}</div>
+      <div class="btn-row">
+        <button class="btn block" id="save-backup-btn">Save backup</button>
+        <button class="btn secondary block" id="restore-backup-btn">Restore from backup</button>
+      </div>
+      <div class="sub" style="margin-top:10px;line-height:1.45">"Save backup" opens your phone's share sheet — choose <b>Save to Files</b> to keep a copy on the phone itself, or <b>Google Drive</b> to put it in your Drive. Doing both takes about ten seconds.</div>
+      <input type="file" id="restore-file-input" accept="application/json" style="display:none" />
+    </div>
+
+    <h2>Activity</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px">The last 200 changes made from any account, and who made each one.</div>
+      <button class="btn secondary block" id="set-activity">See recent activity</button>
+    </div>
+    ` : ''}
+
+    <h2>Message templates</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px">The wording used for payment and session reminders.</div>
+      <button class="btn secondary block" id="set-templates">Manage message templates</button>
+    </div>
+  `;
+
+  document.getElementById('set-password').addEventListener('click', openChangePasswordModal);
+  document.getElementById('set-signout').addEventListener('click', signOut);
+  document.getElementById('set-templates').addEventListener('click', () => openTemplateManagerModal());
+  if (!owner) return;
+
+  document.getElementById('set-activity').addEventListener('click', openActivityModal);
+  document.getElementById('set-add-staff').addEventListener('click', openAddStaffModal);
+  document.querySelectorAll('[data-manage]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const u = (users || []).find((x) => String(x.id) === btn.dataset.manage);
+      if (u) openManageStaffModal(u);
+    });
+  });
+
+  document.getElementById('save-backup-btn').addEventListener('click', (e) => prepareBackup(e.currentTarget));
+  document.getElementById('restore-backup-btn').addEventListener('click', () => {
+    document.getElementById('restore-file-input').click();
+  });
+  document.getElementById('restore-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm('This replaces ALL current data on the server with the contents of this backup file. This cannot be undone. Continue?')) {
+      e.target.value = '';
+      return;
+    }
+    try {
+      const text = await file.text();
+      const dump = JSON.parse(text);
+      const result = await api.restoreBackup(dump);
+      for (const store of ['clients', 'services', 'products', 'appointments', 'meta']) {
+        await idb.clear(store);
+      }
+      alert('Restore complete: ' + result.restored.map((r) => `${r.table} (${r.count})`).join(', '));
+      location.reload();
+    } catch (err) {
+      alert('Restore failed: ' + err.message + '\n\nMake sure you selected a Fit Cube backup .json file, and that you have an internet connection (restore only works online).');
+    }
+  });
 }
 
 function openChangePasswordModal() {
@@ -1763,38 +1828,6 @@ function openChangePasswordModal() {
   });
 }
 
-async function openStaffModal() {
-  openModal(`<h3>Staff &amp; access</h3><div class="empty">Loading…</div>`);
-  let users = [];
-  try {
-    users = await api.listUsers();
-  } catch (err) {
-    openModal(`<h3>Staff &amp; access</h3><div class="empty">${esc(err.message)}</div>`);
-    return;
-  }
-  openModal(`
-    <h3>Staff &amp; access</h3>
-    <div class="sub" style="margin-bottom:12px;line-height:1.45">Staff can run sessions, clients, schedule, stock and sales. They can't see revenue or profit, take or restore backups, or manage accounts.</div>
-    ${users.map((u) => `
-      <div class="session-row">
-        <div>
-          <div>${esc(u.display_name)}${u.active ? '' : ' <span class="tag-chip">suspended</span>'}</div>
-          <div class="sub">${esc(u.username)} · ${u.role === 'owner' ? 'Owner' : 'Staff'}${u.last_login_at ? ` · last in ${fmtDate(u.last_login_at)}` : ' · never signed in'}</div>
-        </div>
-        ${u.role === 'owner' ? '' : `<button class="btn secondary" data-manage="${u.id}" style="padding:6px 10px;font-size:0.78rem">Manage</button>`}
-      </div>
-    `).join('')}
-    <div class="btn-row" style="margin-top:12px"><button class="btn block" id="u-add">Add a staff account</button></div>
-  `);
-  document.getElementById('u-add').addEventListener('click', openAddStaffModal);
-  document.querySelectorAll('[data-manage]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const u = users.find((x) => String(x.id) === btn.dataset.manage);
-      if (u) openManageStaffModal(u);
-    });
-  });
-}
-
 function openAddStaffModal() {
   openModal(`
     <h3>Add a staff account</h3>
@@ -1818,7 +1851,8 @@ function openAddStaffModal() {
         username: document.getElementById('u-username').value.trim(),
         password: document.getElementById('u-password').value,
       });
-      openStaffModal();
+      closeModal();
+      renderSettings();
     } catch (e2) {
       err.textContent = e2.message;
       btn.disabled = false;
@@ -1839,17 +1873,17 @@ function openManageStaffModal(u) {
     const pw = prompt('New password for ' + u.display_name + ' (at least 8 characters, with a number):');
     if (!pw) return;
     api.updateUser(u.id, { password: pw })
-      .then(() => { alert('Password set. They have been signed out everywhere.'); openStaffModal(); })
+      .then(() => { alert('Password set. They have been signed out everywhere.'); closeModal(); renderSettings(); })
       .catch((e) => alert(e.message));
   });
   document.getElementById('m-toggle').addEventListener('click', () => {
     api.updateUser(u.id, { active: !u.active })
-      .then(openStaffModal)
+      .then(() => { closeModal(); renderSettings(); })
       .catch((e) => alert(e.message));
   });
   document.getElementById('m-delete').addEventListener('click', () => {
     if (!confirm(`Remove ${u.display_name}'s account? They'll be signed out and won't be able to get back in.`)) return;
-    api.deleteUser(u.id).then(openStaffModal).catch((e) => alert(e.message));
+    api.deleteUser(u.id).then(() => { closeModal(); renderSettings(); }).catch((e) => alert(e.message));
   });
 }
 
@@ -1898,7 +1932,7 @@ function describeAction(action) {
 async function boot() {
   document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
   updateThemeToggleIcon();
-  document.getElementById('account-btn').addEventListener('click', openAccountModal);
+  document.getElementById('settings-btn').addEventListener('click', () => { location.hash = '#/settings'; });
 
   const status = await api.authStatus();
 
