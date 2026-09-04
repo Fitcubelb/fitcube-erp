@@ -290,6 +290,13 @@ const api = {
     return rawFetch('POST', '/api/backup/import', dump);
   },
 
+  async importClients(contacts) {
+    // Same reasoning as restoreBackup — a one-time bulk write that only
+    // makes sense against the live server, not something to replay later
+    // from an offline queue.
+    return rawFetch('POST', '/api/clients/import', { contacts });
+  },
+
   async dashboardSummary() {
     try {
       const data = await get('/api/dashboard/summary');

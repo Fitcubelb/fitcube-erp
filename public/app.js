@@ -143,6 +143,45 @@ function openModal(innerHtml) {
   }, { passive: false });
 }
 
+// Wires a save/submit button so its handler can never run twice at once.
+// Every "Save" button in the app used to fire its async handler again on a
+// second tap or Enter-key-repeat while the first request was still in
+// flight — on a slow connection (or Render's free tier waking up) that's
+// easy to do without meaning to, and it was the actual cause behind reports
+// like "the session got logged twice" or "the photo uploaded twice": each
+// tap made its own real request, so idempotency keys couldn't catch it —
+// only not sending the second request in the first place can. The button is
+// disabled and shows "Saving…" for the duration of the handler; a thrown
+// error is shown to the user and re-enables the button, and a handler that
+// simply returns (a validation check that isn't ready to submit yet) also
+// re-enables it, silently.
+function guardedClick(btnId, handler) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  const originalText = btn.textContent;
+  let running = false;
+  btn.addEventListener('click', async (e) => {
+    if (running || btn.disabled) return;
+    running = true;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      await handler(e);
+    } catch (err) {
+      alert('Could not save: ' + (err && err.message ? err.message : err));
+    } finally {
+      running = false;
+      // The handler may have already closed the modal (removing the
+      // button from the DOM) or navigated away — only touch it if it's
+      // still there.
+      if (document.body.contains(btn)) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    }
+  });
+}
+
 // ---------- router ----------
 
 function currentRoute() {
@@ -158,6 +197,7 @@ async function render() {
   refreshStatusPill();
 
   if (route === 'dashboard') return renderDashboard();
+  if (route === 'accounting') return renderAccounting();
   // #/clients/new?name=…&phone=… — lets an iOS Shortcut (or any link) hand a
   // contact straight into the New client form, which is the closest thing
   // iPhone allows to picking from the address book inside a web app.
@@ -186,6 +226,11 @@ document.querySelectorAll('.tab').forEach((btn) => {
 
 // ---------- dashboard ----------
 
+// Kept deliberately short: four numbers that call for action today (who's
+// coming in, who owes money, how big the client base is, what's prepaid) —
+// everything money-detailed (revenue, margin, cost of goods) lives on the
+// Accounting page instead, one tap away, so this screen doesn't turn into a
+// wall of figures every time it opens.
 async function renderDashboard() {
   viewEl.innerHTML = `<h1>Overview</h1><div class="empty">Loading…</div>`;
   const { data, fromCache } = await api.dashboardSummary();
@@ -194,28 +239,13 @@ async function renderDashboard() {
     <h1>Overview</h1>
     ${fromCache ? `<div class="sync-banner">Showing last saved data — you're offline.</div>` : ''}
     <div class="grid-2">
-      ${isOwner() ? `<div class="card"><div class="stat" style="color:var(--accent)">${money(data.revenue_total)}</div><div class="stat-label">Total revenue collected</div></div>` : ''}
-      <div class="card"><div class="stat" style="color:var(--unpaid)">${money(data.unpaid_total)}</div><div class="stat-label">Unpaid balance (${data.unpaid_entries} entries)</div></div>
-      <div class="card"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits</div></div>
       <div class="card"><div class="stat">${data.appointments_today}</div><div class="stat-label">Appointments today</div></div>
       <div class="card"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
+      <div class="card"><div class="stat" style="color:var(--unpaid)">${money(data.unpaid_total)}</div><div class="stat-label">Unpaid balance (${data.unpaid_entries} entries)</div></div>
+      <div class="card"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits</div></div>
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
     ${isOwner() ? backupNudgeHtml() : ''}
-
-    ${isOwner() ? `
-    <h2>Profit &amp; loss</h2>
-    <div class="card">
-      <div class="grid-2" style="margin-bottom:12px">
-        <div><div class="stat" style="color:var(--accent)">${money(data.gross_profit)}</div><div class="stat-label">Gross profit</div></div>
-        <div><div class="stat" style="color:var(--unpaid)">${money(data.cogs_total)}</div><div class="stat-label">Cost of goods sold</div></div>
-      </div>
-      <div class="session-row"><div>Session revenue</div><div>${money(data.session_revenue_total)}</div></div>
-      <div class="session-row"><div>Product sales revenue</div><div>${money(data.product_revenue_total)}</div></div>
-      <div class="session-row"><div>Money spent restocking</div><div>${money(data.purchases_total)}</div></div>
-      <div class="session-row"><div>Current inventory value (at cost)</div><div>${money(data.inventory_value)}</div></div>
-    </div>
-    ` : ''}
 
     <h2>Quick actions</h2>
     <div class="btn-row">
@@ -223,11 +253,56 @@ async function renderDashboard() {
       <button class="btn secondary block" onclick="location.hash='#/schedule'">Schedule</button>
     </div>
     <div class="btn-row">
+      ${isOwner() ? `<button class="btn secondary block" onclick="location.hash='#/accounting'">Accounting</button>` : ''}
       <button class="btn secondary block" id="manage-templates-btn">Message templates</button>
     </div>
 
   `;
   document.getElementById('manage-templates-btn').addEventListener('click', () => openTemplateManagerModal());
+}
+
+// Revenue, margin, and everything money-detailed — moved off Overview so
+// that screen stays to the handful of numbers worth checking every day.
+// Owner only: the server itself withholds these fields from a staff account,
+// so this also bounces straight back if one somehow lands here.
+async function renderAccounting() {
+  if (!isOwner()) { location.hash = '#/dashboard'; return; }
+  viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Accounting</h1><div class="empty">Loading…</div>`;
+  const { data, fromCache } = await api.dashboardSummary();
+  if (!data || data.revenue_total === undefined) {
+    viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Accounting</h1><div class="empty">No data yet — connect once online to load this page.</div>`;
+    return;
+  }
+  viewEl.innerHTML = `
+    <button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button>
+    <h1>Accounting</h1>
+    ${fromCache ? `<div class="sync-banner">Showing last saved data — you're offline.</div>` : ''}
+
+    <div class="grid-2">
+      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.revenue_total)}</div><div class="stat-label">Total revenue collected</div></div>
+      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.gross_profit)}</div><div class="stat-label">Gross profit</div></div>
+    </div>
+
+    <h2>Profit &amp; loss</h2>
+    <div class="card">
+      <div class="session-row"><div>Session revenue</div><div>${money(data.session_revenue_total)}</div></div>
+      <div class="session-row"><div>Product sales revenue</div><div>${money(data.product_revenue_total)}</div></div>
+      <div class="session-row"><div>Cost of goods sold</div><div>${money(data.cogs_total)}</div></div>
+      <div class="session-row"><div>Money spent restocking</div><div>${money(data.purchases_total)}</div></div>
+      <div class="session-row"><div>Current inventory value (at cost)</div><div>${money(data.inventory_value)}</div></div>
+    </div>
+
+    <h2>Revenue by service</h2>
+    <div id="acct-revenue-report"><div class="empty">Loading…</div></div>
+  `;
+  try {
+    const { data: revenue, fromCache: revenueFromCache } = await api.revenueReport();
+    document.getElementById('acct-revenue-report').innerHTML = revenue
+      ? revenueSectionHtml(revenue, revenueFromCache)
+      : '<div class="empty">No revenue data yet.</div>';
+  } catch (err) {
+    document.getElementById('acct-revenue-report').innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
 }
 
 // ---------- backups ----------
@@ -474,18 +549,6 @@ function paintClientsList(data, fromCache) {
 const CONTACT_PICKER_SUPPORTED = 'contacts' in navigator && 'ContactsManager' in window;
 const CLIPBOARD_READ_SUPPORTED = !!(navigator.clipboard && navigator.clipboard.readText);
 
-// Tip shown under the name/phone fields on iPhone, where the button above is
-// a clipboard paste rather than a real picker.
-const CONTACT_TIP_HTML = CONTACT_PICKER_SUPPORTED
-  ? ''
-  : `<div class="sub" style="margin-top:8px;line-height:1.45">On iPhone: tap the Name or Phone box and choose <b>AutoFill Contact</b> above the keyboard to pull a contact in. (Needs Settings → Safari → AutoFill → Contact Info switched on.) Or copy the number in Contacts and use the Paste button.</div>`;
-
-// Used where there's no paste button to point at — editing an existing client,
-// where the number is usually already filled in and only needs a correction.
-const AUTOFILL_ONLY_TIP_HTML = CONTACT_PICKER_SUPPORTED
-  ? ''
-  : `<div class="sub" style="margin-top:8px;line-height:1.45">On iPhone: tap the Name or Phone box and choose <b>AutoFill Contact</b> above the keyboard to pull a number from your contacts.</div>`;
-
 // Renders the button that fills a phone field from the address book. Call
 // contactPickerButtonHtml() where the button should render, then
 // wireContactPicker() once the modal's HTML is in the DOM.
@@ -539,7 +602,6 @@ function openAddClientModal(prefill = {}) {
       <label>Phone</label>
       <input id="f-phone" name="tel" placeholder="70 123 456" autocomplete="tel" type="tel" value="${esc(prefill.phone || '')}" />
     </form>
-    ${CONTACT_TIP_HTML}
     <label>Notes</label><textarea id="f-notes" placeholder="Optional"></textarea>
     <label>Goal (optional)</label>
     <input id="f-goal" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
@@ -548,7 +610,7 @@ function openAddClientModal(prefill = {}) {
     <div class="btn-row"><button class="btn block" id="f-save">Save client</button></div>
   `);
   wireContactPicker('pick-contact-btn', 'f-phone', 'f-name');
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     const name = document.getElementById('f-name').value.trim();
     if (!name) return;
     const phone = document.getElementById('f-phone').value.trim();
@@ -715,7 +777,6 @@ function openEditClientModal(c) {
       <label>Phone</label>
       <input id="f-phone" name="tel" value="${esc(c.phone || '')}" type="tel" autocomplete="tel" placeholder="70 123 456" />
     </form>
-    ${AUTOFILL_ONLY_TIP_HTML}
     <label>Notes</label><textarea id="f-notes">${esc(c.notes || '')}</textarea>
     <label>Goal</label>
     <input id="f-goal" value="${esc(c.goal || '')}" placeholder="e.g. Lose 5kg by December, fix squat form" autocomplete="off" />
@@ -726,7 +787,7 @@ function openEditClientModal(c) {
       <button class="btn danger" id="f-archive">Archive client</button>
     </div>
   `);
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     const name = document.getElementById('f-name').value.trim();
     if (!name) { alert('Name is required.'); return; }
     // Sent as '' rather than null when cleared: the server's UPDATE uses
@@ -819,27 +880,16 @@ function openAddPhotoModal(clientId) {
       preview.innerHTML = `<div class="sub" style="color:var(--danger)">${esc(err.message)}</div>`;
     }
   });
-  let saving = false;
-  saveBtn.addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     // Photos are large and slow to upload, which makes an impatient second
-    // tap very easy — and that used to send the picture twice.
-    if (!dataUrl || saving) return;
-    saving = true;
-    saveBtn.disabled = true;
-    saveBtn.textContent = 'Saving…';
-    try {
-      await api.addClientPhoto(clientId, {
-        image_data: dataUrl,
-        caption: document.getElementById('f-photo-caption').value.trim() || null,
-      });
-      closeModal();
-      renderClientDetail(clientId);
-    } catch (err) {
-      saving = false;
-      saveBtn.disabled = false;
-      saveBtn.textContent = 'Save photo';
-      alert('Could not save the photo: ' + err.message);
-    }
+    // tap very easy — guardedClick is what stops that becoming two photos.
+    if (!dataUrl) return;
+    await api.addClientPhoto(clientId, {
+      image_data: dataUrl,
+      caption: document.getElementById('f-photo-caption').value.trim() || null,
+    });
+    closeModal();
+    renderClientDetail(clientId);
   });
 }
 
@@ -920,7 +970,7 @@ function openAddMetricModal(clientId) {
     <label>Note</label><input id="f-note" placeholder="Optional — how they're feeling, a PR hit, etc." />
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     const val = (id) => { const v = document.getElementById(id).value; return v === '' ? null : Number(v); };
     const weight = val('f-weight'), bodyFat = val('f-bodyfat'), chest = val('f-chest'),
       waist = val('f-waist'), hips = val('f-hips'), arm = val('f-arm'), thigh = val('f-thigh');
@@ -1033,7 +1083,7 @@ function openEditTemplateModal(t) {
     <div class="sub" style="margin-top:4px">Placeholders: {name}, {service}, {when}, {amount}</div>
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     const name = document.getElementById('f-name').value.trim();
     const body = document.getElementById('f-body').value.trim();
     if (!name || !body) return;
@@ -1062,7 +1112,7 @@ async function openLogSessionModal(clientId) {
     <label>Note</label><input id="f-note" placeholder="Optional" />
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     const amount = document.getElementById('f-amount').value;
     await api.logSession(clientId, {
       service_id: document.getElementById('f-service').value || null,
@@ -1089,7 +1139,7 @@ async function openAddAppointmentModal(clientId) {
     <label>Note</label><input id="f-note" placeholder="Optional" />
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     await api.createAppointment({
       client_id: clientId,
       service_id: document.getElementById('f-service').value || null,
@@ -1203,7 +1253,6 @@ function openNewAppointmentModal(clientsIn, servicesIn, onSaved) {
         <label>Phone</label>
         <input id="f-newclient-phone" name="tel" placeholder="70 123 456" type="tel" autocomplete="tel" />
       </form>
-      ${CONTACT_TIP_HTML}
     </div>
 
     <label style="margin-top:16px">Service</label>
@@ -1280,7 +1329,7 @@ function openNewAppointmentModal(clientsIn, servicesIn, onSaved) {
     if (!showing) document.getElementById('f-newservice-name').focus();
   });
 
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     let clientId = selectedClientId;
     if (!clientNewFields.hidden) {
       const name = document.getElementById('f-newclient-name').value.trim();
@@ -1372,7 +1421,7 @@ function openAddProductModal() {
     <label>Reorder level (low-stock alert)</label><input id="f-reorder" type="number" step="1" value="0" />
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     const name = document.getElementById('f-name').value.trim();
     if (!name) return;
     await api.createProduct({
@@ -1399,7 +1448,7 @@ function openEditProductModal(p) {
     <label>Reorder level</label><input id="f-reorder" type="number" step="1" value="${p.reorder_level}" />
     <div class="btn-row"><button class="btn block" id="f-save">Save</button></div>
   `);
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     await api.updateProduct(p.id, {
       name: document.getElementById('f-name').value.trim(),
       category: document.getElementById('f-category').value.trim() || null,
@@ -1500,7 +1549,7 @@ async function openSaleModal() {
   document.getElementById('f-product').addEventListener('change', (e) => {
     document.getElementById('f-price').value = e.target.selectedOptions[0].dataset.price || 0;
   });
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     await api.recordSale({
       client_id: document.getElementById('f-client').value || null,
       items: [{ product_id: document.getElementById('f-product').value, qty: Number(document.getElementById('f-qty').value), unit_price: Number(document.getElementById('f-price').value) }],
@@ -1527,7 +1576,7 @@ async function openPurchaseModal() {
   document.getElementById('f-product').addEventListener('change', (e) => {
     document.getElementById('f-cost').value = e.target.selectedOptions[0].dataset.cost || 0;
   });
-  document.getElementById('f-save').addEventListener('click', async () => {
+  guardedClick('f-save', async () => {
     await api.recordPurchase({
       supplier: document.getElementById('f-supplier').value.trim() || null,
       items: [{ product_id: document.getElementById('f-product').value, qty: Number(document.getElementById('f-qty').value), unit_cost: Number(document.getElementById('f-cost').value) }],
@@ -1712,6 +1761,12 @@ async function renderSettings() {
     </div>
 
     ${owner ? `
+    <h2>Accounting</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px">Revenue, profit, and the full financial breakdown — kept off the main Overview.</div>
+      <button class="btn secondary block" id="set-accounting">Open accounting</button>
+    </div>
+
     <h2>Staff &amp; access</h2>
     <div class="card">
       <div class="sub" style="margin-bottom:12px;line-height:1.45">Staff can run clients, sessions, schedule, stock and sales. They can't see revenue or profit, take backups, or manage accounts.</div>
@@ -1738,6 +1793,12 @@ async function renderSettings() {
       <input type="file" id="restore-file-input" accept="application/json" style="display:none" />
     </div>
 
+    <h2>Import clients</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px;line-height:1.45">Bring in a CSV of contacts — fills in phone numbers for clients already here and adds anyone new.</div>
+      <button class="btn secondary block" id="set-import-clients">Import from a file</button>
+    </div>
+
     <h2>Activity</h2>
     <div class="card">
       <div class="sub" style="margin-bottom:12px">The last 200 changes made from any account, and who made each one.</div>
@@ -1757,6 +1818,8 @@ async function renderSettings() {
   document.getElementById('set-templates').addEventListener('click', () => openTemplateManagerModal());
   if (!owner) return;
 
+  document.getElementById('set-accounting').addEventListener('click', () => { location.hash = '#/accounting'; });
+  document.getElementById('set-import-clients').addEventListener('click', openImportClientsModal);
   document.getElementById('set-activity').addEventListener('click', openActivityModal);
   document.getElementById('set-add-staff').addEventListener('click', openAddStaffModal);
   document.querySelectorAll('[data-manage]').forEach((btn) => {
@@ -1857,6 +1920,132 @@ function openAddStaffModal() {
       err.textContent = e2.message;
       btn.disabled = false;
     }
+  });
+}
+
+// ---------- Contacts import ----------
+
+// Reads a small CSV export of contacts (name, phone) — from a phone's
+// address book export, a spreadsheet saved as CSV, or anywhere else — and
+// turns it into a list of {name, phone} objects for the import endpoint to
+// match against the existing client list. Column order is sniffed from the
+// header row so "Name,Phone" and "First Name,Last Name,Phone Number" (and
+// similar) both work without the user having to reformat anything; a file
+// with no recognizable header just falls back to 2 or 3 plain columns.
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  const pushField = () => { row.push(field); field = ''; };
+  const pushRow = () => { pushField(); rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else { field += c; }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      pushField();
+    } else if (c === '\n') {
+      pushRow();
+    } else if (c === '\r') {
+      // skip — \r\n line endings are handled by the \n branch above
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) pushRow();
+  return rows.filter((r) => r.some((cell) => cell.trim() !== ''));
+}
+
+function parseContactsCsv(text) {
+  const rows = parseCsvRows(text);
+  if (!rows.length) return [];
+  const headerCandidates = rows[0].map((h) => h.trim().toLowerCase().replace(/[\s_]+/g, ' '));
+  const findCol = (names) => headerCandidates.findIndex((h) => names.includes(h));
+  const nameCol = findCol(['name', 'full name', 'client', 'client name']);
+  const firstCol = findCol(['first name', 'firstname', 'first']);
+  const lastCol = findCol(['last name', 'lastname', 'last']);
+  const phoneCol = findCol(['phone', 'phone number', 'mobile', 'mobile number', 'tel', 'telephone']);
+  const hasHeader = nameCol >= 0 || firstCol >= 0 || lastCol >= 0 || phoneCol >= 0;
+
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const contacts = [];
+  for (const r of dataRows) {
+    let name, phone;
+    if (hasHeader) {
+      const first = firstCol >= 0 ? (r[firstCol] || '').trim() : '';
+      const last = lastCol >= 0 ? (r[lastCol] || '').trim() : '';
+      name = nameCol >= 0 ? (r[nameCol] || '').trim() : `${first} ${last}`.trim();
+      phone = phoneCol >= 0 ? (r[phoneCol] || '').trim() : '';
+    } else if (r.length >= 3) {
+      name = `${(r[0] || '').trim()} ${(r[1] || '').trim()}`.trim();
+      phone = (r[2] || '').trim();
+    } else {
+      name = (r[0] || '').trim();
+      phone = (r[1] || '').trim();
+    }
+    name = name.replace(/\s+/g, ' ');
+    if (!name) continue;
+    contacts.push({ name, phone: phone || null });
+  }
+  return contacts;
+}
+
+function openImportClientsModal() {
+  openModal(`
+    <h3>Import clients</h3>
+    <div class="sub" style="margin-bottom:12px;line-height:1.45">Upload a CSV of contacts (name and phone). Anyone already in the system gets their phone number filled in if it's missing — nothing already on file is overwritten. Anyone new is added as a client.</div>
+    <input id="ic-file" type="file" accept=".csv,text/csv" />
+    <div class="sub" id="ic-preview" style="margin-top:8px"></div>
+    <div class="sub" id="ic-error" style="color:var(--unpaid);margin-top:8px"></div>
+    <div class="btn-row" style="margin-top:10px"><button class="btn block" id="ic-import" disabled>Import</button></div>
+  `);
+  const preview = document.getElementById('ic-preview');
+  const err = document.getElementById('ic-error');
+  const importBtn = document.getElementById('ic-import');
+  let contacts = null;
+  document.getElementById('ic-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    contacts = null;
+    importBtn.disabled = true;
+    err.textContent = '';
+    preview.textContent = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      contacts = parseContactsCsv(text);
+      if (!contacts.length) {
+        err.textContent = 'No contacts found in that file.';
+        return;
+      }
+      preview.textContent = `${contacts.length} contact(s) found — ready to import.`;
+      importBtn.disabled = false;
+    } catch (e2) {
+      err.textContent = 'Could not read that file.';
+    }
+  });
+  guardedClick('ic-import', async () => {
+    if (!contacts || !contacts.length) return;
+    err.textContent = '';
+    const result = await api.importClients(contacts);
+    const groups = (result.shared_phone_groups || [])
+      .map((g) => `<div class="session-row"><div>${esc(g.names.join(' / '))}</div></div>`).join('');
+    openModal(`
+      <h3>Import complete</h3>
+      <div class="card">
+        <div class="session-row"><div>New clients added</div><div>${result.created}</div></div>
+        <div class="session-row"><div>Phone numbers filled in</div><div>${result.filled_phone}</div></div>
+        <div class="session-row"><div>Already complete, left alone</div><div>${result.unchanged}</div></div>
+        ${result.skipped_invalid ? `<div class="session-row"><div>Skipped (no name)</div><div>${result.skipped_invalid}</div></div>` : ''}
+      </div>
+      ${groups ? `<h2>Same phone number, different names</h2><div class="sub" style="margin-bottom:8px;line-height:1.45">Worth a quick look — could be a household sharing one phone, or the same person entered twice.</div><div class="card">${groups}</div>` : ''}
+      <div class="btn-row" style="margin-top:10px"><button class="btn block" id="ic-done">Done</button></div>
+    `);
+    document.getElementById('ic-done').addEventListener('click', () => { closeModal(); renderSettings(); });
   });
 }
 

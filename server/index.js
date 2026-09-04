@@ -388,6 +388,83 @@ app.put('/api/clients/:id', async (req, res) => {
   ok(res, { ok: true });
 });
 
+// Bulk-import clients from a contacts spreadsheet (owner only). Matching is
+// by NAME, not phone — a phone number can be shared by a whole household, so
+// two different names on the same number must stay two different clients,
+// never get merged into one. An exact (case-insensitive) name match against
+// the existing list fills in that client's phone if it's missing, and is
+// left alone if it already has one; a name that matches no one is created as
+// a brand-new client. The phone number is only used afterwards to flag
+// "different names, same number" for a human to glance at — never to decide
+// who's who. Runs the whole batch against one in-memory snapshot of clients
+// (updated as rows are created) so later rows in the same file can match
+// earlier ones just added.
+function phoneMatchKey(raw) {
+  if (!raw) return null;
+  let digits = String(raw).replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.startsWith('961')) digits = digits.slice(3);
+  digits = digits.replace(/^0+/, '');
+  return digits || null;
+}
+
+app.post('/api/clients/import', requireOwner, async (req, res) => {
+  const contacts = Array.isArray(req.body && req.body.contacts) ? req.body.contacts : null;
+  if (!contacts) return bad(res, 'contacts must be an array of {name, phone}');
+  if (contacts.length > 2000) return bad(res, 'That is too many contacts for one import — split the file.');
+
+  const existingRows = (await db.execute('SELECT id, name, phone FROM clients WHERE archived = 0')).rows;
+  const clients = existingRows.map((c) => ({ id: Number(c.id), name: c.name, phone: c.phone }));
+
+  const results = { created: 0, filled_phone: 0, unchanged: 0, skipped_invalid: 0, details: [] };
+  const sharedPhoneGroups = new Map(); // phone key -> set of distinct names seen in this file, for the summary only
+
+  for (const raw of contacts) {
+    const name = raw && raw.name ? String(raw.name).trim().replace(/\s+/g, ' ') : '';
+    const phone = raw && raw.phone ? String(raw.phone).trim() : '';
+    if (!name) { results.skipped_invalid++; continue; }
+
+    const pkey = phoneMatchKey(phone);
+    if (pkey) {
+      if (!sharedPhoneGroups.has(pkey)) sharedPhoneGroups.set(pkey, new Map());
+      sharedPhoneGroups.get(pkey).set(name.toLowerCase(), name);
+    }
+
+    const nameMatch = clients.find((c) => c.name.trim().toLowerCase() === name.toLowerCase());
+    if (nameMatch) {
+      if (!nameMatch.phone && phone) {
+        await db.execute({ sql: `UPDATE clients SET phone = ?, updated_at = datetime('now') WHERE id = ?`, args: [phone, nameMatch.id] });
+        nameMatch.phone = phone;
+        results.filled_phone++;
+        results.details.push({ name, phone, action: 'filled_phone', matched: nameMatch.name });
+      } else {
+        results.unchanged++;
+        results.details.push({ name, phone, action: 'unchanged', matched: nameMatch.name });
+      }
+      continue;
+    }
+
+    const r = await db.execute({
+      sql: 'INSERT INTO clients (name, phone) VALUES (?, ?)',
+      args: [name, phone || null],
+    });
+    const newClient = { id: Number(r.lastInsertRowid), name, phone: phone || null };
+    clients.push(newClient);
+    results.created++;
+    results.details.push({ name, phone, action: 'created' });
+  }
+
+  // Different names sharing one phone number in the uploaded file — not
+  // necessarily an error (a household can share a landline), but worth a
+  // human glance rather than silently importing them as-is.
+  results.shared_phone_groups = [...sharedPhoneGroups.entries()]
+    .filter(([, names]) => names.size > 1)
+    .map(([key, names]) => ({ phone_key: key, names: [...names.values()] }));
+
+  await auth.logActivity(req.user, 'clients.import', `Imported a contacts file: ${results.created} created, ${results.filled_phone} phone numbers filled in, ${results.unchanged} already complete`);
+  ok(res, results);
+});
+
 // ---------- Progress photos ----------
 
 app.post('/api/clients/:id/photos', async (req, res) => {
