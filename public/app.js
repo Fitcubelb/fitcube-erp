@@ -390,7 +390,6 @@ async function renderClientDetail(id) {
     <div class="card">
       <div class="sub" style="margin-bottom:6px">${esc(c.phone || 'No phone on file')}</div>
       ${c.notes ? `<div class="sub">${esc(c.notes)}</div>` : ''}
-      ${c.goal ? `<div class="sub" style="margin-top:6px;color:var(--accent);font-weight:600">🎯 Goal: ${esc(c.goal)}</div>` : ''}
       <div class="btn-row">
         <button class="btn secondary" id="edit-client-btn">Edit contact info</button>
         ${c.phone ? `<button class="btn secondary" id="remind-btn">Remind</button>` : ''}
@@ -416,6 +415,7 @@ async function renderClientDetail(id) {
 
     <h2>Progress metrics</h2>
     <div class="card">
+      ${c.goal ? `<div class="sub" style="margin-bottom:10px;color:var(--accent);font-weight:600">🎯 Goal: ${esc(c.goal)}</div>` : ''}
       ${weightSparklineSvg(metrics)}
       ${metrics.length ? [...metrics].reverse().map((m) => metricRowHtml(m)).join('') : '<div class="empty">No progress metrics logged yet.</div>'}
     </div>
