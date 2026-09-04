@@ -6,13 +6,28 @@ const { db, init } = require('./db/client');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' })); // generous limit so a full backup restore upload never gets rejected
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 app.use(express.static(PUBLIC_DIR));
 
 const ok = (res, data) => res.json(data);
 const bad = (res, msg, code = 400) => res.status(code).json({ error: msg });
+
+// Best-effort phone normalization for WhatsApp links: strips formatting, and
+// assumes a bare local-looking number (no + / country code) is Lebanese
+// mobile (leading 0 dropped, country code 961 added) since that's where
+// Fit Cube is based. A number already starting with + or a country code is
+// left as-is.
+function toWhatsAppNumber(raw) {
+  if (!raw) return null;
+  let n = String(raw).replace(/[^\d+]/g, '');
+  if (n.startsWith('+')) return n.slice(1);
+  if (n.startsWith('00')) return n.slice(2);
+  if (n.startsWith('961')) return n;
+  if (n.startsWith('0')) n = n.slice(1);
+  return '961' + n;
+}
 
 // ---------- Clients ----------
 
@@ -32,7 +47,9 @@ app.get('/api/clients', async (req, res) => {
         SUM(CASE WHEN payment_state='unpaid' THEN COALESCE(amount,0) ELSE 0 END) AS unpaid_amount,
         SUM(CASE WHEN payment_state='unpaid' AND amount IS NULL THEN 1 ELSE 0 END) AS unpaid_sessions_no_amount,
         SUM(CASE WHEN payment_state='prepaid' AND amount IS NULL THEN 1 ELSE 0 END) AS prepaid_session_credits,
-        SUM(CASE WHEN payment_state='prepaid' AND amount IS NOT NULL THEN amount ELSE 0 END) AS prepaid_amount
+        SUM(CASE WHEN payment_state='prepaid' AND amount IS NOT NULL THEN amount ELSE 0 END) AS prepaid_amount,
+        COUNT(*) AS total_sessions,
+        MAX(COALESCE(session_date, created_at)) AS last_activity
       FROM session_entries GROUP BY client_id
     `)
   ).rows;
@@ -149,7 +166,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
 
 app.get('/api/appointments', async (req, res) => {
   const { from, to } = req.query;
-  let sql = `SELECT a.*, c.name as client_name, s.name as service_name
+  let sql = `SELECT a.*, c.name as client_name, c.phone as client_phone, s.name as service_name
              FROM appointments a
              JOIN clients c ON c.id = a.client_id
              LEFT JOIN services s ON s.id = a.service_id`;
@@ -281,6 +298,58 @@ app.post('/api/purchases', async (req, res) => {
   ok(res, { id: purchaseId, total });
 });
 
+// ---------- WhatsApp reminders ----------
+// Default (always available, $0): the server just hands back a wa.me link
+// built from the client's number; the app opens it and the WhatsApp app
+// itself takes over — no browser tab, nothing to configure.
+//
+// Optional upgrade (only if WHATSAPP_ACCESS_TOKEN + WHATSAPP_PHONE_NUMBER_ID
+// are set): sends automatically via Meta's WhatsApp Cloud API, no tap-to-send
+// needed at all. This requires a Meta Business/WhatsApp Cloud API setup and
+// an approved message template on Anthony's end (see README) — and, as of
+// Oct 1 2026, Meta charges a small per-message fee for these (no more free
+// tier), so it's opt-in only and never used unless those env vars are set.
+
+app.post('/api/whatsapp/link', async (req, res) => {
+  const { phone, message } = req.body || {};
+  const number = toWhatsAppNumber(phone);
+  if (!number) return bad(res, 'No phone number on file for this client.');
+  const url = `https://wa.me/${number}${message ? `?text=${encodeURIComponent(message)}` : ''}`;
+  ok(res, { url });
+});
+
+app.post('/api/whatsapp/send', async (req, res) => {
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId) {
+    return ok(res, { configured: false }); // frontend falls back to the free wa.me link
+  }
+  const { phone, clientName, bodyParams } = req.body || {};
+  const number = toWhatsAppNumber(phone);
+  if (!number) return bad(res, 'No phone number on file for this client.');
+  try {
+    const resp = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: number,
+        type: 'template',
+        template: {
+          name: process.env.WHATSAPP_TEMPLATE_NAME || 'session_reminder',
+          language: { code: process.env.WHATSAPP_TEMPLATE_LANG || 'en_US' },
+          components: [{ type: 'body', parameters: (bodyParams || [clientName || '']).map((t) => ({ type: 'text', text: String(t) })) }],
+        },
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) return ok(res, { configured: true, ok: false, error: data?.error?.message || 'WhatsApp API error' });
+    ok(res, { configured: true, ok: true, data });
+  } catch (err) {
+    ok(res, { configured: true, ok: false, error: err.message });
+  }
+});
+
 // ---------- Dashboard ----------
 
 app.get('/api/dashboard/summary', async (req, res) => {
@@ -289,6 +358,8 @@ app.get('/api/dashboard/summary', async (req, res) => {
   const lowStock = (await db.execute('SELECT COUNT(*) as n FROM products WHERE qty_on_hand <= reorder_level')).rows[0];
   const todayCount = (await db.execute(`SELECT COUNT(*) as n FROM appointments WHERE date(starts_at) = date('now') AND status='scheduled'`)).rows[0];
   const clientCount = (await db.execute('SELECT COUNT(*) as n FROM clients WHERE archived=0')).rows[0];
+  const sessionRevenue = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL`)).rows[0];
+  const productRevenue = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM sales')).rows[0];
   ok(res, {
     unpaid_total: Number(unpaid.total),
     unpaid_entries: Number(unpaid.n),
@@ -296,7 +367,85 @@ app.get('/api/dashboard/summary', async (req, res) => {
     low_stock_products: Number(lowStock.n),
     appointments_today: Number(todayCount.n),
     active_clients: Number(clientCount.n),
+    revenue_total: Number(sessionRevenue.total) + Number(productRevenue.total),
   });
+});
+
+// ---------- Reports ----------
+
+app.get('/api/reports/revenue', async (req, res) => {
+  const byService = (
+    await db.execute(`
+      SELECT COALESCE(s.name, 'Unassigned / general') as service_name,
+        SUM(CASE WHEN se.payment_state IN ('paid_now','prepaid') AND se.amount IS NOT NULL THEN se.amount ELSE 0 END) as revenue,
+        COUNT(CASE WHEN se.payment_state='unpaid' THEN 1 END) as unpaid_sessions,
+        COALESCE(SUM(CASE WHEN se.payment_state='unpaid' THEN se.amount ELSE 0 END),0) as unpaid_amount
+      FROM session_entries se
+      LEFT JOIN services s ON s.id = se.service_id
+      GROUP BY COALESCE(s.name, 'Unassigned / general')
+      HAVING revenue > 0 OR unpaid_sessions > 0
+      ORDER BY revenue DESC
+    `)
+  ).rows;
+  const sessionRevenue = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL`)).rows[0];
+  const productRevenue = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM sales')).rows[0];
+  const topProducts = (
+    await db.execute(`
+      SELECT p.name, SUM(si.qty) as qty_sold, SUM(si.qty * si.unit_price) as revenue
+      FROM sale_items si JOIN products p ON p.id = si.product_id
+      GROUP BY p.name ORDER BY revenue DESC LIMIT 10
+    `)
+  ).rows;
+  ok(res, {
+    by_service: byService,
+    session_revenue_total: Number(sessionRevenue.total),
+    product_sales_total: Number(productRevenue.total),
+    grand_total: Number(sessionRevenue.total) + Number(productRevenue.total),
+    top_products: topProducts,
+  });
+});
+
+// ---------- Backup / restore ----------
+// The single most important safety net in this app: everything else (server
+// filesystem, hosting free tier, even Turso) is a "should be fine" — this is
+// a "definitely fine" that lives wherever Anthony puts the downloaded file.
+
+const BACKUP_TABLES = ['clients', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+const BACKUP_INSERT_ORDER = ['clients', 'services', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+const BACKUP_DELETE_ORDER = [...BACKUP_INSERT_ORDER].reverse(); // children before parents
+
+app.get('/api/backup/export', async (req, res) => {
+  const dump = { version: 1, exported_at: new Date().toISOString() };
+  for (const t of BACKUP_TABLES) {
+    dump[t] = (await db.execute(`SELECT * FROM ${t}`)).rows;
+  }
+  const filename = `fitcube-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Type', 'application/json');
+  res.send(JSON.stringify(dump, null, 2));
+});
+
+app.post('/api/backup/import', async (req, res) => {
+  const dump = req.body;
+  if (!dump || dump.version !== 1) return bad(res, 'This does not look like a Fit Cube backup file.');
+  try {
+    for (const t of BACKUP_DELETE_ORDER) {
+      await db.execute(`DELETE FROM ${t}`);
+    }
+    const restored = [];
+    for (const t of BACKUP_INSERT_ORDER) {
+      const rows = dump[t] || [];
+      for (const row of rows) {
+        const cols = Object.keys(row);
+        const placeholders = cols.map(() => '?').join(',');
+        await db.execute({ sql: `INSERT INTO ${t} (${cols.join(',')}) VALUES (${placeholders})`, args: cols.map((c) => row[c]) });
+      }
+      restored.push({ table: t, count: rows.length });
+    }
+    ok(res, { ok: true, restored });
+  } catch (err) {
+    bad(res, 'Restore failed: ' + err.message, 500);
+  }
 });
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));

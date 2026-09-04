@@ -163,6 +163,35 @@ const api = {
     catch { return { data: [], fromCache: true }; }
   },
 
+  async revenueReport() {
+    try {
+      const data = await get('/api/reports/revenue');
+      await idb.put('meta', { key: 'revenue_report', value: data });
+      return { data, fromCache: false };
+    } catch {
+      const cached = await idb.get('meta', 'revenue_report');
+      return { data: cached ? cached.value : null, fromCache: true };
+    }
+  },
+
+  async whatsappLink(phone, message) {
+    return rawFetch('POST', '/api/whatsapp/link', { phone, message });
+  },
+
+  async whatsappSend(phone, clientName, bodyParams) {
+    try {
+      return await rawFetch('POST', '/api/whatsapp/send', { phone, clientName, bodyParams });
+    } catch {
+      return { configured: false };
+    }
+  },
+
+  async restoreBackup(dump) {
+    // Deliberately NOT queued to the offline outbox — a restore only makes
+    // sense against the live server, and must not silently no-op offline.
+    return rawFetch('POST', '/api/backup/import', dump);
+  },
+
   async dashboardSummary() {
     try {
       const data = await get('/api/dashboard/summary');

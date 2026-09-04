@@ -1,6 +1,6 @@
 // Fit Cube ERP service worker.
 // Bump CACHE_VERSION whenever app shell files change so clients pick up the new build.
-const CACHE_VERSION = 'fitcube-shell-v1';
+const CACHE_VERSION = 'fitcube-shell-v2';
 const SHELL_FILES = [
   '/',
   '/index.html',
@@ -12,6 +12,8 @@ const SHELL_FILES = [
   '/manifest.json',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
+  '/icons/header-logo.png',
+  '/icons/favicon-32.png',
 ];
 
 self.addEventListener('install', (event) => {
