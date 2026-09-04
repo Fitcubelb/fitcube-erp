@@ -438,7 +438,7 @@ async function renderClientDetail(id) {
       ${appts.length ? appts.map((a) => `
         <div class="session-row">
           <div><div>${esc(a.service_name || 'Session')}</div><div class="sub">${fmtDate(a.starts_at)} · ${a.status}</div></div>
-          ${a.status === 'scheduled' && c.phone ? `<button class="btn secondary" style="padding:6px 10px;font-size:0.75rem" data-remind="${a.id}" data-service="${esc(a.service_name || 'session')}" data-when="${a.starts_at}">Remind</button>` : ''}
+          ${a.status === 'scheduled' && c.phone ? `<button class="btn secondary" style="padding:6px 10px;font-size:0.75rem" data-remind="${a.id}" data-service="${esc(a.service_name || 'training')}" data-when="${a.starts_at}">Remind</button>` : ''}
         </div>`).join('') : '<div class="empty">No appointments scheduled.</div>'}
     </div>
   `;
@@ -740,10 +740,13 @@ function fillTemplate(body, vars) {
 }
 
 function buildReminderVars(c, unpaidTotal, nextAppt) {
+  // {service} sits inside "your {service} session is on {when}" in the
+  // default template, so the fallback needs to be a plain word (not
+  // "session" itself, which would read as "your session session is on…").
   return {
     name: c.name,
     amount: money(unpaidTotal),
-    service: nextAppt ? (nextAppt.service_name || 'session') : 'your next session',
+    service: nextAppt ? (nextAppt.service_name || 'training') : 'next',
     when: nextAppt ? fmtDate(nextAppt.starts_at) : 'your next visit',
   };
 }
