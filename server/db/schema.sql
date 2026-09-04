@@ -259,6 +259,17 @@ CREATE TABLE IF NOT EXISTS backup_snapshots (
   size_bytes INTEGER
 );
 
+-- Optional, opt-in only (WHATSAPP_WEB_AUTOMATION=true): holds the WhatsApp
+-- Web login session (an unofficial, free automation path — see README) as a
+-- compressed blob, so a real WhatsApp account stays paired across Render's
+-- free-tier restarts/redeploys instead of needing the QR code re-scanned
+-- every time. Not used at all unless that env var is set.
+CREATE TABLE IF NOT EXISTS whatsapp_sessions (
+  session TEXT PRIMARY KEY,
+  data BLOB NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_log_created ON activity_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_request_log_created ON request_log(created_at);

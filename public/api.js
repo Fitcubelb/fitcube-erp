@@ -402,12 +402,27 @@ const api = {
     return rawFetch('POST', '/api/whatsapp/link', { phone, message });
   },
 
-  async whatsappSend(phone, clientName, bodyParams) {
+  async whatsappSend(phone, clientName, bodyParams, message) {
     try {
-      return await rawFetch('POST', '/api/whatsapp/send', { phone, clientName, bodyParams });
+      return await rawFetch('POST', '/api/whatsapp/send', { phone, clientName, bodyParams, message });
     } catch {
       return { configured: false };
     }
+  },
+
+  // Optional, unofficial WhatsApp Web automation — owner-only pairing.
+  async whatsappWebStatus() {
+    return rawFetch('GET', '/api/whatsapp-web/status');
+  },
+  async whatsappWebQr() {
+    try {
+      return await rawFetch('GET', '/api/whatsapp-web/qr');
+    } catch {
+      return { dataUrl: null };
+    }
+  },
+  async whatsappWebLogout() {
+    return rawFetch('POST', '/api/whatsapp-web/logout');
   },
 
   async restoreBackup(dump) {

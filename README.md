@@ -72,6 +72,15 @@ Under the hood, for the record: passwords are stored as salted scrypt hashes (ne
 
 Once those are set, "Remind" sends automatically with no app-switching at all. Leave them unset and everything still works via the free WhatsApp-app-opening method above — nothing breaks either way.
 
+**Third option — fully automatic AND $0, but unofficial and riskier:** instead of Meta's paid API, the server can drive your real WhatsApp account the same way WhatsApp Web does (pairing by QR code, like linking a new device). This costs nothing per message, but it is **not** an official WhatsApp feature — it's against WhatsApp's Terms of Service, and carries a real risk of the paired number getting flagged, rate-limited, or banned. Only turn this on if you've accepted that risk for your real business number.
+
+1. Set `WHATSAPP_WEB_AUTOMATION=true` as an environment variable on the server (Render → your service → Environment).
+2. Redeploy, then open ⚙ Settings → "WhatsApp automation status" in the app (owner only).
+3. Scan the QR code shown there with your own phone: WhatsApp → Settings → Linked Devices → Link a Device.
+4. Once it says "Connected," "Remind" sends automatically — no Meta setup, no per-message fee, no template approval.
+
+Notes: this uses a headless, automated browser (`whatsapp-web.js` + `@sparticuz/chromium`) running on the server — it may simply fail to start on some hosts (it needs to launch a real browser process, which not every environment supports the same way; if it fails, the status screen shows the error and the app quietly keeps using the free tap-to-send method, nothing breaks). The paired session is backed up to your Turso database so it survives Render's free-tier restarts/sleep cycles without needing the QR re-scanned every time — but if it ever does get logged out (by WhatsApp itself, or a ban), you'll need to scan it again from Settings. If both this and the Meta API are configured, this free option is tried first.
+
 ## If the app looks out of date after an update
 
 Because this is an installable offline-capable app, your phone keeps a cached copy of it so it still works with no signal — that's the whole point, but it means a brand-new version sometimes takes an extra moment to show up. If you ever add a feature and don't see it: fully close the app (swipe it away, don't just background it) and reopen it once while you have signal. That's normally all it takes — the app checks for a new version in the background and swaps it in automatically the next time you open it.

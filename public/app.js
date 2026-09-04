@@ -74,7 +74,7 @@ async function sendWhatsAppReminder(client, message, bodyParams) {
   if (!client.phone) { alert('No phone number on file for this client.'); return; }
   // Try the optional automatic Cloud API send first (only "configured" if
   // Anthony has set up WhatsApp Business API credentials on the server).
-  const sendResult = await api.whatsappSend(client.phone, client.name, bodyParams);
+  const sendResult = await api.whatsappSend(client.phone, client.name, bodyParams, message);
   if (sendResult.configured) {
     if (sendResult.ok) alert(`Reminder sent to ${client.name} automatically via WhatsApp.`);
     else alert(`Couldn't send automatically (${sendResult.error || 'unknown error'}) — falling back to opening WhatsApp.`);
@@ -468,6 +468,59 @@ function openBackupSaveModal(summary, sizeKb) {
     markBackupSaved();
     closeModal();
   });
+}
+
+// Pairing UI for the optional, unofficial WhatsApp Web automation (see
+// server/whatsapp-web-client.js) — shows connection status and, while
+// waiting to be paired, a QR code to scan with WhatsApp → Linked Devices on
+// Anthony's own phone. Nobody but him can complete that scan; this modal
+// just surfaces the code and polls the status until it's picked up.
+async function openWhatsAppWebModal() {
+  const paintWWStatus = async () => {
+    const s = await api.whatsappWebStatus();
+    const body = document.getElementById('ww-body');
+    if (!body) return; // modal was closed — stop
+    if (!s.enabled) {
+      body.innerHTML = `
+        <div class="sub" style="line-height:1.5">Not turned on for this app yet. To enable it, set <code>WHATSAPP_WEB_AUTOMATION=true</code> as an environment variable on the server (Render → your service → Environment) and it'll appear here to pair.</div>`;
+      return;
+    }
+    if (s.status === 'ready') {
+      body.innerHTML = `
+        <div class="sub" style="margin-bottom:12px;color:var(--credit);font-weight:600">✓ Connected — reminders send automatically now.</div>
+        <button class="btn danger block" id="ww-logout">Disconnect this number</button>`;
+      document.getElementById('ww-logout').addEventListener('click', async () => {
+        if (!confirm('Disconnect WhatsApp automation? You\'ll need to scan the QR code again to reconnect.')) return;
+        await api.whatsappWebLogout();
+        paintWWStatus();
+      });
+      return;
+    }
+    if (s.status === 'qr' && s.hasQr) {
+      const { dataUrl } = await api.whatsappWebQr();
+      body.innerHTML = `
+        <div class="sub" style="margin-bottom:10px">On your phone: WhatsApp → Settings → Linked Devices → Link a Device, then scan this:</div>
+        ${dataUrl ? `<img src="${dataUrl}" style="width:100%;max-width:260px;display:block;margin:0 auto 10px;border-radius:8px" />` : '<div class="empty">Loading code…</div>'}
+        <div class="sub" style="text-align:center">Refreshes automatically — leave this open until it connects.</div>`;
+      return;
+    }
+    if (s.status === 'starting') {
+      body.innerHTML = `<div class="empty">Starting up…</div>`;
+      return;
+    }
+    body.innerHTML = `
+      <div class="sub" style="line-height:1.5">${s.status === 'error' || s.status === 'auth_failure' ? `Something went wrong${s.error ? ': ' + esc(s.error) : '.'} Automatic reminders will keep using the free tap-to-send method until this is fixed.` : 'Not connected. Waiting for a QR code…'}</div>`;
+  };
+
+  openModal(`
+    <h3>WhatsApp automation</h3>
+    <div id="ww-body"><div class="empty">Checking…</div></div>
+  `);
+  await paintWWStatus();
+  const poll = setInterval(() => {
+    if (!document.getElementById('ww-body')) { clearInterval(poll); return; }
+    paintWWStatus();
+  }, 4000);
 }
 
 // The server-side automatic snapshots (see maybeCreateSnapshot in
@@ -2352,6 +2405,12 @@ async function renderSettings() {
       <div class="sub" style="margin-bottom:12px">The last 200 changes made from any account, and who made each one.</div>
       <button class="btn secondary block" id="set-activity">See recent activity</button>
     </div>
+
+    <h2>WhatsApp automation (unofficial, free)</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px;line-height:1.45">An optional, $0 way to send "Remind" messages automatically, without Meta's paid API — it pairs your real WhatsApp the same way WhatsApp Web does. This isn't an official WhatsApp feature and carries a small risk of the number getting flagged, so it's off unless set up on the server, and the free tap-to-send stays the fallback either way.</div>
+      <button class="btn secondary block" id="set-whatsapp-web">WhatsApp automation status</button>
+    </div>
     ` : ''}
 
     <h2>Session packages</h2>
@@ -2386,6 +2445,7 @@ async function renderSettings() {
   });
 
   document.getElementById('set-view-snapshots').addEventListener('click', openSnapshotsModal);
+  document.getElementById('set-whatsapp-web').addEventListener('click', openWhatsAppWebModal);
   document.getElementById('save-backup-btn').addEventListener('click', (e) => prepareBackup(e.currentTarget));
   document.getElementById('restore-backup-btn').addEventListener('click', () => {
     document.getElementById('restore-file-input').click();

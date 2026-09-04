@@ -3,3 +3,5 @@ node_modules/
 server/db/fitcube.db
 server/db/fitcube.db-*
 *.log
+.wwebjs_auth/
+.wwebjs_cache/

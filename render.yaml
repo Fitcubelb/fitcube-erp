@@ -20,3 +20,15 @@ services:
         sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
+      # Skips whatsapp-web.js's own Chromium download at install time — the
+      # optional automation below (WHATSAPP_WEB_AUTOMATION) supplies its own
+      # via @sparticuz/chromium instead, which is far more likely to actually
+      # launch on Render's free plan. Harmless to leave set even if that
+      # feature is never turned on.
+      - key: PUPPETEER_SKIP_DOWNLOAD
+        value: "true"
+      # Optional, free (unofficial, ToS-risk) WhatsApp automation — see
+      # README.md "WhatsApp reminders". Leave unset/false to not use it at
+      # all; the app works exactly the same either way.
+      - key: WHATSAPP_WEB_AUTOMATION
+        value: "false"

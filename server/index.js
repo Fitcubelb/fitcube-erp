@@ -3,6 +3,7 @@ const path = require('path');
 const express = require('express');
 const { db, init } = require('./db/client');
 const auth = require('./auth');
+const waWeb = require('./whatsapp-web-client');
 
 const app = express();
 // Render terminates TLS in front of this app; without this, req.secure and
@@ -991,14 +992,21 @@ app.post('/api/whatsapp/link', async (req, res) => {
 });
 
 app.post('/api/whatsapp/send', async (req, res) => {
+  const { phone, clientName, bodyParams, message } = req.body || {};
+  const number = toWhatsAppNumber(phone);
+  if (!number) return bad(res, 'No phone number on file for this client.');
+
+  // Try the free, unofficial WhatsApp Web automation first, if it's enabled
+  // and actually paired — sends the same free-text message the wa.me
+  // fallback would have used (no Meta template restriction on this path).
+  const webResult = await waWeb.sendMessage(number, message || (bodyParams || []).join(' '));
+  if (webResult) return ok(res, { configured: true, via: 'web', ...webResult });
+
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   if (!token || !phoneNumberId) {
     return ok(res, { configured: false }); // frontend falls back to the free wa.me link
   }
-  const { phone, clientName, bodyParams } = req.body || {};
-  const number = toWhatsAppNumber(phone);
-  if (!number) return bad(res, 'No phone number on file for this client.');
   try {
     const resp = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
       method: 'POST',
@@ -1020,6 +1028,22 @@ app.post('/api/whatsapp/send', async (req, res) => {
   } catch (err) {
     ok(res, { configured: true, ok: false, error: err.message });
   }
+});
+
+// Owner-only: pairing status/QR for the optional, unofficial WhatsApp Web
+// automation (see server/whatsapp-web-client.js and README) — lets Anthony
+// scan the QR with his own phone from Settings, without anyone else seeing it.
+app.get('/api/whatsapp-web/status', requireOwner, async (req, res) => {
+  ok(res, waWeb.getStatus());
+});
+app.get('/api/whatsapp-web/qr', requireOwner, async (req, res) => {
+  const dataUrl = await waWeb.getQrDataUrl();
+  if (!dataUrl) return bad(res, 'No QR code available right now.', 404);
+  ok(res, { dataUrl });
+});
+app.post('/api/whatsapp-web/logout', requireOwner, async (req, res) => {
+  await waWeb.logout();
+  ok(res, { ok: true });
 });
 
 // ---------- Dashboard ----------
@@ -1306,6 +1330,10 @@ init()
     // fresh deploy or a long-asleep free-tier instance should still end up
     // with a recent snapshot without waiting on someone opening the app.
     maybeCreateSnapshot();
+    // Optional, opt-in WhatsApp automation (see server/whatsapp-web-client.js)
+    // — a no-op unless WHATSAPP_WEB_AUTOMATION=true, and never allowed to
+    // take the server down if it fails to start.
+    waWeb.init(db).catch((err) => console.error('WhatsApp Web automation init error:', err.message));
   })
   .catch((err) => {
     console.error('Failed to initialize database', err);
