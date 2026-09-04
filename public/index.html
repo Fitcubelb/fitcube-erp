@@ -34,6 +34,13 @@
 
 <div id="modal-root"></div>
 
+<script>
+  // Bump this alongside CACHE_VERSION in sw.js on every release — it's what
+  // Settings compares against the server's current version to show whether
+  // the copy someone's phone is running is actually up to date, instead of
+  // everyone just having to guess and hope a close/reopen worked.
+  window.APP_BUILD = 'fitcube-shell-v25';
+</script>
 <script src="/db.js"></script>
 <script src="/api.js"></script>
 <script src="/sync.js"></script>
@@ -41,17 +48,23 @@
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js').then((reg) => {
+      // updateViaCache: 'none' — never let the browser's own HTTP cache
+      // answer for sw.js itself; every check below must compare against
+      // what the server actually has right now, not a cached copy of it.
+      navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then((reg) => {
         // Browsers (iOS Safari especially) only check for a new service
         // worker occasionally by default — an installed app can otherwise
-        // show an old cached version for a long time. Force a check on
-        // every launch, and again whenever the app regains focus (e.g.
-        // reopened from the home screen), since that doesn't always count
-        // as a fresh navigation.
+        // show an old cached version for a long time, sometimes even across
+        // several reopens if iOS restores a suspended tab instead of truly
+        // reloading it. Force a check on every launch, again whenever the
+        // app regains focus (e.g. reopened from the home screen, which
+        // doesn't always count as a fresh navigation), and on a standing
+        // timer as a last resort for whenever neither of those fires.
         reg.update();
         document.addEventListener('visibilitychange', () => {
           if (document.visibilityState === 'visible') reg.update();
         });
+        setInterval(() => reg.update(), 60000);
       });
     });
     // Once a newly-installed service worker takes over, the page already

@@ -1,5 +1,6 @@
 require('dotenv').config();
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const { db, init } = require('./db/client');
 const auth = require('./auth');
@@ -1316,6 +1317,22 @@ app.post('/api/backup/snapshots/:id/restore', requireOwner, async (req, res) => 
 });
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+// Lets the app compare "what I'm running" (window.APP_BUILD, baked in at
+// build time) against "what the server actually has right now" — read
+// straight from sw.js's own CACHE_VERSION rather than a second constant, so
+// the two can never drift apart from each other. Settings uses this to show
+// plainly whether someone's phone is behind, instead of everyone having to
+// guess whether a close/reopen actually picked up an update.
+app.get('/api/version', (req, res) => {
+  let version = 'unknown';
+  try {
+    const swSource = fs.readFileSync(path.join(PUBLIC_DIR, 'sw.js'), 'utf8');
+    version = (swSource.match(/CACHE_VERSION\s*=\s*'([^']+)'/) || [])[1] || 'unknown';
+  } catch { /* fall through with 'unknown' */ }
+  res.set('Cache-Control', 'no-store');
+  ok(res, { version });
+});
 
 // SPA fallback (last, after API routes)
 app.get(/^\/(?!api\/).*/, (req, res) => {

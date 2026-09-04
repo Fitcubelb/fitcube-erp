@@ -2345,6 +2345,13 @@ async function renderSettings() {
   viewEl.innerHTML = `
     <h1>Settings</h1>
 
+    <h2>App version</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:10px">Running: <b id="app-ver-running">${esc(window.APP_BUILD || 'unknown')}</b> · Latest available: <b id="app-ver-latest">checking…</b></div>
+      <button class="btn secondary block" id="force-refresh-btn">Check for updates</button>
+      <div class="sub" style="margin-top:8px;line-height:1.4">If "Running" ever falls behind "Latest," tap this — it clears the app's saved copy and reloads fresh. No data is affected.</div>
+    </div>
+
     <h2>Your account</h2>
     <div class="card">
       <div style="margin-bottom:2px">${esc(currentUser ? currentUser.display_name : '')}</div>
@@ -2425,6 +2432,31 @@ async function renderSettings() {
       <button class="btn secondary block" id="set-templates">Manage message templates</button>
     </div>
   `;
+
+  fetch('/api/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => {
+    const el = document.getElementById('app-ver-latest');
+    if (el) el.textContent = v.version || 'unknown';
+  }).catch(() => {
+    const el = document.getElementById('app-ver-latest');
+    if (el) el.textContent = "couldn't check (offline?)";
+  });
+  document.getElementById('force-refresh-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Refreshing…';
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } finally {
+      window.location.reload();
+    }
+  });
 
   document.getElementById('set-password').addEventListener('click', openChangePasswordModal);
   document.getElementById('set-signout').addEventListener('click', signOut);
