@@ -310,6 +310,12 @@ async function prepareBackup(btn) {
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Preparing…';
+  // Building the snapshot takes several seconds on the free tier, so say so
+  // rather than leaving a dead button.
+  openModal(`
+    <h3>Preparing your backup…</h3>
+    <div class="sub" style="line-height:1.45">Collecting every client, session, photo and sale. This takes a few seconds — the save options appear as soon as it's ready.</div>
+  `);
   try {
     const res = await fetch('/api/backup/export', { cache: 'no-store' });
     if (!res.ok) throw new Error('the server returned ' + res.status);
@@ -324,6 +330,7 @@ async function prepareBackup(btn) {
     pendingBackup = { blob, filename };
     openBackupSaveModal(summary, Math.max(1, Math.round(blob.size / 1024)));
   } catch (err) {
+    closeModal();
     alert('Couldn\'t prepare the backup: ' + err.message + '\n\nYou need to be online to make a backup.');
   } finally {
     btn.disabled = false;
