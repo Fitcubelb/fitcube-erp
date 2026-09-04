@@ -161,7 +161,6 @@ async function renderDashboard() {
       <div class="session-row"><div>Product sales revenue</div><div>${money(data.product_revenue_total)}</div></div>
       <div class="session-row"><div>Money spent restocking</div><div>${money(data.purchases_total)}</div></div>
       <div class="session-row"><div>Current inventory value (at cost)</div><div>${money(data.inventory_value)}</div></div>
-      <div class="sub" style="margin-top:8px">Gross profit = all revenue (sessions + product sales) minus what the sold products cost you. Sessions have no product cost, so most of your profit lives there. Restocking spend and inventory value are shown for reference — they don't reduce profit until stock is sold.</div>
     </div>
 
     <h2>Quick actions</h2>

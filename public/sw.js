@@ -1,6 +1,6 @@
 // Fit Cube ERP service worker.
 // Bump CACHE_VERSION whenever app shell files change so clients pick up the new build.
-const CACHE_VERSION = 'fitcube-shell-v3';
+const CACHE_VERSION = 'fitcube-shell-v4';
 const SHELL_FILES = [
   '/',
   '/index.html',
