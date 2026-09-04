@@ -813,6 +813,11 @@ app.post('/api/whatsapp/send', async (req, res) => {
 // ---------- Dashboard ----------
 
 app.get('/api/dashboard/summary', async (req, res) => {
+  // Overview is the screen everyone hits every time they open the app, so
+  // it's the natural place to piggyback the automatic-snapshot check (see
+  // maybeCreateSnapshot below) — deliberately not awaited so a slow snapshot
+  // never delays this response.
+  maybeCreateSnapshot();
   const unpaid = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total, COUNT(*) as n FROM session_entries WHERE payment_state='unpaid'`)).rows[0];
   const prepaidCredits = (await db.execute(`SELECT COUNT(*) as n FROM session_entries WHERE payment_state='prepaid' AND amount IS NULL`)).rows[0];
   const lowStock = (await db.execute('SELECT COUNT(*) as n FROM products WHERE qty_on_hand <= reorder_level')).rows[0];
@@ -912,23 +917,106 @@ app.get('/api/backup/export', requireOwner, async (req, res) => {
   res.send(JSON.stringify(dump, null, 2));
 });
 
+async function restoreFromDump(dump) {
+  if (!dump || dump.version !== 1) throw new Error('This does not look like a Fit Cube backup file.');
+  for (const t of BACKUP_DELETE_ORDER) {
+    await db.execute(`DELETE FROM ${t}`);
+  }
+  const restored = [];
+  for (const t of BACKUP_INSERT_ORDER) {
+    const rows = dump[t] || [];
+    for (const row of rows) {
+      const cols = Object.keys(row);
+      const placeholders = cols.map(() => '?').join(',');
+      await db.execute({ sql: `INSERT INTO ${t} (${cols.join(',')}) VALUES (${placeholders})`, args: cols.map((c) => row[c]) });
+    }
+    restored.push({ table: t, count: rows.length });
+  }
+  return restored;
+}
+
 app.post('/api/backup/import', requireOwner, async (req, res) => {
-  const dump = req.body;
-  if (!dump || dump.version !== 1) return bad(res, 'This does not look like a Fit Cube backup file.');
   try {
-    for (const t of BACKUP_DELETE_ORDER) {
-      await db.execute(`DELETE FROM ${t}`);
+    const restored = await restoreFromDump(req.body);
+    ok(res, { ok: true, restored });
+  } catch (err) {
+    bad(res, 'Restore failed: ' + err.message, 500);
+  }
+});
+
+// ---------- Automatic snapshots ----------
+// A second, independent safety net that doesn't depend on anyone
+// remembering to tap "Save backup": the server itself keeps a rolling
+// window of full database snapshots inside Turso (a separate service from
+// the app host, so a Render outage or redeploy can't take both out at
+// once). Render's free tier has no built-in scheduler, so instead of a
+// real cron job this piggybacks on ordinary traffic — see the call in
+// GET /api/dashboard/summary — and is cheap on every request but one: an
+// in-memory timestamp skips the DB check entirely unless at least an hour
+// has passed, and even then it only does the expensive export/insert work
+// when the newest snapshot has gone stale.
+const SNAPSHOT_INTERVAL_HOURS = 20;
+const SNAPSHOT_RETENTION = 14;
+const SNAPSHOT_CHECK_THROTTLE_MS = 60 * 60 * 1000;
+let lastSnapshotCheckAt = 0;
+
+async function maybeCreateSnapshot() {
+  const now = Date.now();
+  if (now - lastSnapshotCheckAt < SNAPSHOT_CHECK_THROTTLE_MS) return;
+  lastSnapshotCheckAt = now;
+  try {
+    const latest = (await db.execute('SELECT created_at FROM backup_snapshots ORDER BY id DESC LIMIT 1')).rows[0];
+    if (latest) {
+      const ageHours = (now - new Date(latest.created_at.replace(' ', 'T') + 'Z').getTime()) / 3600000;
+      if (!isNaN(ageHours) && ageHours < SNAPSHOT_INTERVAL_HOURS) return;
     }
-    const restored = [];
-    for (const t of BACKUP_INSERT_ORDER) {
-      const rows = dump[t] || [];
-      for (const row of rows) {
-        const cols = Object.keys(row);
-        const placeholders = cols.map(() => '?').join(',');
-        await db.execute({ sql: `INSERT INTO ${t} (${cols.join(',')}) VALUES (${placeholders})`, args: cols.map((c) => row[c]) });
-      }
-      restored.push({ table: t, count: rows.length });
+    const dump = { version: 1, exported_at: new Date().toISOString() };
+    for (const t of BACKUP_TABLES) {
+      dump[t] = (await db.execute(`SELECT * FROM ${t}`)).rows;
     }
+    const json = JSON.stringify(dump);
+    await db.execute({
+      sql: 'INSERT INTO backup_snapshots (data, client_count, size_bytes) VALUES (?, ?, ?)',
+      args: [json, (dump.clients || []).length, Buffer.byteLength(json)],
+    });
+    // Keep only the most recent SNAPSHOT_RETENTION snapshots so this
+    // doesn't grow forever.
+    await db.execute({
+      sql: 'DELETE FROM backup_snapshots WHERE id NOT IN (SELECT id FROM backup_snapshots ORDER BY id DESC LIMIT ?)',
+      args: [SNAPSHOT_RETENTION],
+    });
+  } catch (err) {
+    // A missed snapshot isn't worth failing a request over — the manual
+    // backup flow and the next scheduled attempt are still there.
+    console.error('Automatic snapshot failed:', err.message);
+  }
+}
+
+app.get('/api/backup/snapshots', requireOwner, async (req, res) => {
+  const rows = (
+    await db.execute('SELECT id, created_at, client_count, size_bytes FROM backup_snapshots ORDER BY id DESC')
+  ).rows;
+  ok(res, rows);
+});
+
+app.get('/api/backup/snapshots/:id', requireOwner, async (req, res) => {
+  const row = (
+    await db.execute({ sql: 'SELECT data, created_at FROM backup_snapshots WHERE id = ?', args: [req.params.id] })
+  ).rows[0];
+  if (!row) return bad(res, 'Snapshot not found.', 404);
+  const filename = `fitcube-snapshot-${String(row.created_at).slice(0, 10)}.json`;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Type', 'application/json');
+  res.send(row.data);
+});
+
+app.post('/api/backup/snapshots/:id/restore', requireOwner, async (req, res) => {
+  const row = (
+    await db.execute({ sql: 'SELECT data FROM backup_snapshots WHERE id = ?', args: [req.params.id] })
+  ).rows[0];
+  if (!row) return bad(res, 'Snapshot not found.', 404);
+  try {
+    const restored = await restoreFromDump(JSON.parse(row.data));
     ok(res, { ok: true, restored });
   } catch (err) {
     bad(res, 'Restore failed: ' + err.message, 500);
@@ -946,6 +1034,10 @@ const PORT = process.env.PORT || 3000;
 init()
   .then(() => {
     app.listen(PORT, () => console.log(`Fit Cube ERP running on port ${PORT}`));
+    // Also try right at startup, not just on the next dashboard load — a
+    // fresh deploy or a long-asleep free-tier instance should still end up
+    // with a recent snapshot without waiting on someone opening the app.
+    maybeCreateSnapshot();
   })
   .catch((err) => {
     console.error('Failed to initialize database', err);

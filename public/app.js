@@ -245,16 +245,13 @@ async function renderDashboard() {
       <div class="card"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits</div></div>
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
-    ${isOwner() ? backupNudgeHtml() : ''}
 
     <h2>Quick actions</h2>
-    <div class="btn-row">
-      <button class="btn block" onclick="location.hash='#/clients'">View clients</button>
-      <button class="btn secondary block" onclick="location.hash='#/schedule'">Schedule</button>
-    </div>
-    <div class="btn-row">
-      ${isOwner() ? `<button class="btn secondary block" onclick="location.hash='#/accounting'">Accounting</button>` : ''}
-      <button class="btn secondary block" id="manage-templates-btn">Message templates</button>
+    <div class="action-grid">
+      <button class="action-tile primary" onclick="location.hash='#/clients'"><span class="ic">👥</span>View clients</button>
+      <button class="action-tile" onclick="location.hash='#/schedule'"><span class="ic">📅</span>Schedule</button>
+      ${isOwner() ? `<button class="action-tile" onclick="location.hash='#/accounting'"><span class="ic">💰</span>Accounting</button>` : ''}
+      <button class="action-tile" id="manage-templates-btn"><span class="ic">✉️</span>Message templates</button>
     </div>
 
   `;
@@ -342,16 +339,12 @@ function backupStatusLine() {
   if (days === 1) return 'Last backup: yesterday.';
   return `Last backup: ${days} days ago.`;
 }
-function backupNudgeHtml() {
+// Used only in Settings now (Overview used to show this nudge itself; moved
+// here so a slow or unpaid-balance-heavy Overview screen doesn't also carry
+// a permanent warning card at the top).
+function backupIsStale() {
   const days = daysSinceBackup();
-  if (days !== null && days < BACKUP_STALE_DAYS) return '';
-  const msg = days === null
-    ? 'No backup saved yet — save one to your phone and Drive.'
-    : `It's been ${days} days since your last backup — time for a fresh one.`;
-  return `<div class="card" style="border-color:var(--unpaid)">
-    <div style="margin-bottom:10px">⚠ ${msg}</div>
-    <button class="btn secondary block" onclick="location.hash='#/settings'">Open Data &amp; backup</button>
-  </div>`;
+  return days === null || days >= BACKUP_STALE_DAYS;
 }
 
 let pendingBackup = null;
@@ -433,6 +426,70 @@ function openBackupSaveModal(summary, sizeKb) {
     markBackupSaved();
     closeModal();
   });
+}
+
+// The server-side automatic snapshots (see maybeCreateSnapshot in
+// server/index.js) shown and managed from Settings → Automatic backups.
+async function openSnapshotsModal() {
+  openModal(`<h3>Automatic backups</h3><div class="empty">Loading…</div>`);
+  let rows;
+  try {
+    rows = await api.listSnapshots();
+  } catch (err) {
+    openModal(`<h3>Automatic backups</h3><div class="empty">${esc(err.message)}</div>`);
+    return;
+  }
+  openModal(`
+    <h3>Automatic backups</h3>
+    <div class="sub" style="margin-bottom:12px;line-height:1.45">Taken automatically, roughly once a day, and stored separately from anything saved by hand — up to the last 14 are kept.</div>
+    ${rows.length ? rows.map((r) => `
+      <div class="session-row">
+        <div>
+          <div>${fmtDate(r.created_at)}</div>
+          <div class="sub">${r.client_count ?? 0} client${r.client_count === 1 ? '' : 's'} · ${Math.max(1, Math.round((r.size_bytes || 0) / 1024))} KB</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn secondary" data-save-snap="${r.id}" style="padding:6px 10px;font-size:0.78rem">Save a copy</button>
+          <button class="btn danger" data-restore-snap="${r.id}" style="padding:6px 10px;font-size:0.78rem">Restore</button>
+        </div>
+      </div>
+    `).join('') : '<div class="empty">No automatic backup yet — the first one is taken shortly after the app is next opened.</div>'}
+  `);
+  document.querySelectorAll('[data-save-snap]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const row = rows.find((r) => String(r.id) === btn.dataset.saveSnap);
+      if (row) saveSnapshotCopy(row);
+    });
+  });
+  document.querySelectorAll('[data-restore-snap]').forEach((btn) => {
+    btn.addEventListener('click', () => restoreSnapshotConfirmed(btn.dataset.restoreSnap));
+  });
+}
+
+async function saveSnapshotCopy(row) {
+  try {
+    const text = await api.fetchSnapshotDump(row.id);
+    const filename = `fitcube-snapshot-${String(row.created_at).slice(0, 10)}.json`;
+    const blob = new Blob([text], { type: 'application/json' });
+    pendingBackup = { blob, filename };
+    openBackupSaveModal(`${row.client_count ?? 0} clients`, Math.max(1, Math.round(blob.size / 1024)));
+  } catch (err) {
+    alert('Could not load that backup: ' + err.message);
+  }
+}
+
+async function restoreSnapshotConfirmed(id) {
+  if (!confirm('This replaces ALL current data on the server with this automatic backup. This cannot be undone. Continue?')) return;
+  try {
+    const result = await api.restoreSnapshot(id);
+    for (const store of ['clients', 'services', 'products', 'appointments', 'meta']) {
+      await idb.clear(store);
+    }
+    alert('Restore complete: ' + result.restored.map((r) => `${r.table} (${r.count})`).join(', '));
+    location.reload();
+  } catch (err) {
+    alert('Restore failed: ' + err.message);
+  }
 }
 
 // ---------- clients ----------
@@ -1784,14 +1841,21 @@ async function renderSettings() {
     </div>
 
     <h2>Data &amp; backup</h2>
+    ${backupIsStale() ? `<div class="card" style="border-color:var(--unpaid);margin-bottom:8px">⚠ ${esc(backupStatusLine())}</div>` : ''}
     <div class="card">
-      <div class="sub" style="margin-bottom:10px">${backupStatusLine()}</div>
+      <div class="sub" style="margin-bottom:10px">${backupIsStale() ? 'Save a copy now, to your phone and to Google Drive.' : esc(backupStatusLine())}</div>
       <div class="btn-row">
         <button class="btn block" id="save-backup-btn">Save backup</button>
         <button class="btn secondary block" id="restore-backup-btn">Restore from backup</button>
       </div>
       <div class="sub" style="margin-top:10px;line-height:1.45">"Save backup" opens your phone's share sheet — choose <b>Save to Files</b> to keep a copy on the phone itself, or <b>Google Drive</b> to put it in your Drive. Doing both takes about ten seconds.</div>
       <input type="file" id="restore-file-input" accept="application/json" style="display:none" />
+    </div>
+
+    <h2>Automatic backups</h2>
+    <div class="card">
+      <div class="sub" style="margin-bottom:12px;line-height:1.45">Besides the backups you save yourself, Fit Cube also keeps its own copy of everything automatically, roughly once a day, stored separately from the app itself — so your data isn't only as safe as the last time someone remembered to tap "Save backup".</div>
+      <button class="btn secondary block" id="set-view-snapshots">View automatic backups</button>
     </div>
 
     <h2>Import clients</h2>
@@ -1832,6 +1896,7 @@ async function renderSettings() {
     });
   });
 
+  document.getElementById('set-view-snapshots').addEventListener('click', openSnapshotsModal);
   document.getElementById('save-backup-btn').addEventListener('click', (e) => prepareBackup(e.currentTarget));
   document.getElementById('restore-backup-btn').addEventListener('click', () => {
     document.getElementById('restore-file-input').click();

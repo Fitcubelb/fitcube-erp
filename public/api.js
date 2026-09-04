@@ -392,6 +392,24 @@ const api = {
     return get('/api/clients/duplicate-check');
   },
 
+  async listSnapshots() {
+    return get('/api/backup/snapshots');
+  },
+
+  async fetchSnapshotDump(id) {
+    // Raw fetch, not `get()` — this returns the backup JSON itself (for
+    // sharing/saving), not an API envelope.
+    const res = await fetch(`/api/backup/snapshots/${id}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.text();
+  },
+
+  async restoreSnapshot(id) {
+    // Same reasoning as restoreBackup — only makes sense against the live
+    // server, never queued for offline replay.
+    return rawFetch('POST', `/api/backup/snapshots/${id}/restore`, {});
+  },
+
   async dashboardSummary() {
     try {
       const data = await get('/api/dashboard/summary');

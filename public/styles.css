@@ -127,6 +127,21 @@ h2 { font-size: 1rem; margin: 18px 0 8px; color: var(--text-dim); font-weight: 6
 .btn.block { width: 100%; }
 .btn-row { display: flex; gap: 8px; margin-top: 10px; }
 
+/* Square quick-action tiles (Overview) — bigger, easier tap targets than a
+   row of skinny buttons, and the icon makes each one recognisable at a
+   glance on a small phone screen. */
+.action-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 10px; }
+.action-tile {
+  aspect-ratio: 1 / 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; border-radius: var(--radius); border: 1px solid var(--border);
+  background: var(--surface); color: var(--text);
+  font-size: 0.85rem; font-weight: 600; text-align: center; padding: 10px; cursor: pointer;
+}
+.action-tile:active { background: var(--surface-2); }
+.action-tile .ic { font-size: 1.9rem; line-height: 1; }
+.action-tile.primary { background: var(--accent); color: #ffffff; border-color: var(--accent); }
+
 .fab {
   position: fixed; right: calc(16px + (100vw - 520px) / 2);
   bottom: calc(80px + env(safe-area-inset-bottom));

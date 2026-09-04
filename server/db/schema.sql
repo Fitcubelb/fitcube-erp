@@ -208,6 +208,20 @@ CREATE TABLE IF NOT EXISTS request_log (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- A second, automatic safety net alongside the manual "Save backup" flow in
+-- Settings. The server takes a full snapshot of the database roughly once a
+-- day (see maybeCreateSnapshot in server/index.js) and keeps a rolling window
+-- of them here, in Turso — a different place than the app server itself —
+-- so data survives even if nobody remembers to export a file by hand.
+CREATE TABLE IF NOT EXISTS backup_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  data TEXT NOT NULL,
+  client_count INTEGER,
+  size_bytes INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_log_created ON activity_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_request_log_created ON request_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_backup_snapshots_created ON backup_snapshots(created_at);
