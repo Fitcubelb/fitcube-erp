@@ -199,6 +199,8 @@ async function render() {
   if (route === 'dashboard') return renderDashboard();
   if (route === 'accounting') return renderAccounting();
   if (route === 'unpaid') return renderUnpaid();
+  if (route === 'credits') return renderCredits();
+  if (route === 'revenue') return renderRevenueDrilldown(param || 'all_time');
   // #/clients/new?name=…&phone=… — lets an iOS Shortcut (or any link) hand a
   // contact straight into the New client form, which is the closest thing
   // iPhone allows to picking from the address book inside a web app.
@@ -243,26 +245,26 @@ async function renderDashboard() {
     <div class="grid-2">
       <div class="card"><div class="stat">${data.appointments_today}</div><div class="stat-label">Appointments today</div></div>
       <div class="card" style="cursor:pointer" onclick="location.hash='#/clients'"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
-      <div class="card" style="cursor:pointer" onclick="location.hash='#/unpaid'"><div class="stat" style="color:var(--unpaid)">${money(data.unpaid_total)}</div><div class="stat-label">Unpaid balance (${data.unpaid_entries} entries) — tap to see who</div></div>
-      <div class="card"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits</div></div>
+      <div class="card" style="cursor:pointer" onclick="location.hash='#/unpaid'"><div class="stat" style="color:var(--unpaid)">${data.unpaid_entries}</div><div class="stat-label">Unpaid sessions — tap to see who</div></div>
+      <div class="card" style="cursor:pointer" onclick="location.hash='#/credits'"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits — tap to see who</div></div>
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
 
     ${isOwner() && data.revenue_periods && data.profit_periods ? `
     <h2>Revenue &amp; profit</h2>
     <div class="grid-2">
-      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.revenue_periods.all_time)}</div><div class="stat-label">Total revenue, all time</div></div>
-      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.profit_periods.all_time)}</div><div class="stat-label">Total profit, all time</div></div>
+      <div class="card" style="cursor:pointer" onclick="location.hash='#/revenue/all_time'"><div class="stat" style="color:var(--accent)">${money(data.revenue_periods.all_time)}</div><div class="stat-label">Total revenue, all time — tap for detail</div></div>
+      <div class="card" style="cursor:pointer" onclick="location.hash='#/revenue/all_time'"><div class="stat" style="color:var(--accent)">${money(data.profit_periods.all_time)}</div><div class="stat-label">Total profit, all time — tap for detail</div></div>
     </div>
-    <div class="segmented" id="money-period">
+    <div class="segmented" id="money-period" data-period="today">
       <button data-period="today" class="active">Today</button>
       <button data-period="this_week">This week</button>
       <button data-period="this_month">This month</button>
       <button data-period="this_year">This year</button>
     </div>
     <div class="grid-2">
-      <div class="card"><div class="stat" id="revenue-period-value" style="color:var(--accent)">${money(data.revenue_periods.today)}</div><div class="stat-label" id="revenue-period-label">Revenue — today</div></div>
-      <div class="card"><div class="stat" id="profit-period-value" style="color:var(--accent)">${money(data.profit_periods.today)}</div><div class="stat-label" id="profit-period-label">Profit — today</div></div>
+      <div class="card" id="revenue-period-card" style="cursor:pointer"><div class="stat" id="revenue-period-value" style="color:var(--accent)">${money(data.revenue_periods.today)}</div><div class="stat-label" id="revenue-period-label">Revenue — today — tap for detail</div></div>
+      <div class="card" id="profit-period-card" style="cursor:pointer"><div class="stat" id="profit-period-value" style="color:var(--accent)">${money(data.profit_periods.today)}</div><div class="stat-label" id="profit-period-label">Profit — today — tap for detail</div></div>
     </div>
     ` : ''}
 
@@ -291,12 +293,16 @@ async function renderDashboard() {
         document.querySelectorAll('#money-period button').forEach((b) => b.classList.remove('active'));
         btn.classList.add('active');
         const period = btn.dataset.period;
+        document.getElementById('money-period').dataset.period = period;
         document.getElementById('revenue-period-value').textContent = money(revenuePeriods[period]);
-        document.getElementById('revenue-period-label').textContent = `Revenue — ${labels[period]}`;
+        document.getElementById('revenue-period-label').textContent = `Revenue — ${labels[period]} — tap for detail`;
         document.getElementById('profit-period-value').textContent = money(profitPeriods[period]);
-        document.getElementById('profit-period-label').textContent = `Profit — ${labels[period]}`;
+        document.getElementById('profit-period-label').textContent = `Profit — ${labels[period]} — tap for detail`;
       });
     });
+    const goToCurrentPeriod = () => { location.hash = '#/revenue/' + document.getElementById('money-period').dataset.period; };
+    document.getElementById('revenue-period-card').addEventListener('click', goToCurrentPeriod);
+    document.getElementById('profit-period-card').addEventListener('click', goToCurrentPeriod);
   }
 }
 
@@ -405,6 +411,120 @@ function unpaidClientHtml(c) {
       ${c.unknown_amount_sessions ? `<div class="session-row" style="padding-left:10px"><div class="sub">Amount not set</div><span class="badge unpaid">${c.unknown_amount_sessions} session${c.unknown_amount_sessions === 1 ? '' : 's'}</span></div>` : ''}
     </div>
   `;
+}
+
+// Drill-down behind Overview's "Prepaid session credits" card: who has
+// credits banked and for which service, instead of one lump count with no
+// way to see whose they are.
+async function renderCredits() {
+  viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Prepaid credits</h1><div class="empty">Loading…</div>`;
+  const { data, fromCache } = await api.creditsReport();
+  if (!data) {
+    viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Prepaid credits</h1><div class="empty">No data yet — connect once online to load this page.</div>`;
+    return;
+  }
+  paintCredits(data, fromCache);
+}
+
+function paintCredits(data, fromCache) {
+  viewEl.innerHTML = `
+    <button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button>
+    <h1>Prepaid credits</h1>
+    ${fromCache ? `<div class="sync-banner">Showing last saved data — you're offline.</div>` : ''}
+    <div class="card"><div class="stat" style="color:var(--credit)">${data.total}</div><div class="stat-label">Credits banked across ${data.clients.length} client${data.clients.length === 1 ? '' : 's'}</div></div>
+    <div id="credits-rows">
+      ${data.clients.length ? data.clients.map((c) => creditsClientHtml(c)).join('') : '<div class="empty">Nobody has prepaid credits right now.</div>'}
+    </div>
+  `;
+  document.querySelectorAll('[data-credits-client]').forEach((el) => {
+    el.addEventListener('click', () => { location.hash = '#/clients/' + el.dataset.creditsClient; });
+  });
+}
+
+function creditsClientHtml(c) {
+  return `
+    <div class="card">
+      <div class="session-row" data-credits-client="${c.client_id}" style="cursor:pointer">
+        <div>
+          <div style="font-weight:600">${esc(c.client_name)}</div>
+          <div class="sub">${esc(c.client_phone || 'No phone on file')}</div>
+        </div>
+        <div class="badge credit">${c.total}</div>
+      </div>
+      ${c.by_service.map((b) => `
+        <div class="session-row" style="padding-left:10px">
+          <div class="sub">${esc(b.service_name)}</div>
+          <div class="badge credit">${b.count}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// Drill-down behind Overview's "Total revenue"/"Total profit" and the
+// Revenue/Profit-by-period cards: which services actually made the money
+// for the selected period, instead of one lump total with no way to see
+// where it came from. Owner only, same as the Accounting page this reuses
+// data from.
+const REVENUE_PERIOD_LABELS = {
+  all_time: 'All time',
+  today: 'Today',
+  this_week: 'This week',
+  this_month: 'This month',
+  this_year: 'This year',
+};
+
+async function renderRevenueDrilldown(period) {
+  if (!isOwner()) { location.hash = '#/dashboard'; return; }
+  const p = REVENUE_PERIOD_LABELS[period] ? period : 'all_time';
+  viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Revenue &amp; profit</h1><div class="empty">Loading…</div>`;
+  const { data, fromCache } = await api.revenueReport(p);
+  if (!data) {
+    viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Revenue &amp; profit</h1><div class="empty">No data yet — connect once online to load this page.</div>`;
+    return;
+  }
+  paintRevenueDrilldown(data, p, fromCache);
+}
+
+function paintRevenueDrilldown(data, period, fromCache) {
+  const rows = (data.by_service || []).filter((s) => Number(s.revenue) > 0 || Number(s.unpaid_sessions) > 0);
+  const max = Math.max(1, ...rows.map((s) => Number(s.revenue)));
+  const periodLabel = REVENUE_PERIOD_LABELS[period].toLowerCase();
+  viewEl.innerHTML = `
+    <button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button>
+    <h1>Revenue &amp; profit</h1>
+    ${fromCache ? `<div class="sync-banner">Showing last saved data — you're offline.</div>` : ''}
+    <div class="segmented" id="revenue-drilldown-period">
+      ${Object.entries(REVENUE_PERIOD_LABELS).map(([key, label]) => `<button data-period="${key}" class="${key === period ? 'active' : ''}">${label}</button>`).join('')}
+    </div>
+    <div class="grid-2">
+      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.grand_total)}</div><div class="stat-label">Revenue — ${esc(periodLabel)}</div></div>
+      <div class="card"><div class="stat" style="color:var(--accent)">${money(data.profit_total)}</div><div class="stat-label">Profit — ${esc(periodLabel)}</div></div>
+    </div>
+    <h2>By service</h2>
+    <div class="card">
+      ${rows.length ? rows.map((s) => `
+        <div style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:4px">
+            <span>${esc(s.service_name)}</span>
+            <span style="font-weight:700">${money(s.revenue)} revenue${Math.round(s.profit) !== Math.round(s.revenue) ? ` · ${money(s.profit)} profit` : ''}${Number(s.unpaid_amount) > 0 ? ` <span style="color:var(--unpaid);font-weight:400">(+${money(s.unpaid_amount)} owed)</span>` : ''}</span>
+          </div>
+          <div style="background:var(--surface-2);border-radius:6px;height:8px;overflow:hidden">
+            <div style="background:var(--accent);height:100%;width:${Math.max(4, (Number(s.revenue) / max) * 100)}%"></div>
+          </div>
+        </div>
+      `).join('') : `<div class="empty">No revenue ${esc(periodLabel === 'all time' ? 'yet' : periodLabel)}.</div>`}
+    </div>
+    ${data.top_products && data.top_products.length ? `
+      <h2>Top-selling products</h2>
+      <div class="card">
+        ${data.top_products.map((pr) => `<div class="session-row"><div>${esc(pr.name)} <span class="sub">× ${pr.qty_sold}</span></div><div>${money(pr.revenue)}</div></div>`).join('')}
+      </div>
+    ` : ''}
+  `;
+  document.querySelectorAll('#revenue-drilldown-period button').forEach((btn) => {
+    btn.addEventListener('click', () => { location.hash = '#/revenue/' + btn.dataset.period; });
+  });
 }
 
 // ---------- backups ----------

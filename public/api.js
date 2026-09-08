@@ -405,13 +405,25 @@ const api = {
     catch { return { data: [], fromCache: true }; }
   },
 
-  async revenueReport() {
+  async revenueReport(period) {
+    const p = period || 'all_time';
     try {
-      const data = await get('/api/reports/revenue');
-      await idb.put('meta', { key: 'revenue_report', value: data });
+      const data = await get('/api/reports/revenue?period=' + encodeURIComponent(p));
+      await idb.put('meta', { key: 'revenue_report_' + p, value: data });
       return { data, fromCache: false };
     } catch {
-      const cached = await idb.get('meta', 'revenue_report');
+      const cached = await idb.get('meta', 'revenue_report_' + p);
+      return { data: cached ? cached.value : null, fromCache: true };
+    }
+  },
+
+  async creditsReport() {
+    try {
+      const data = await get('/api/reports/credits');
+      await idb.put('meta', { key: 'credits_report', value: data });
+      return { data, fromCache: false };
+    } catch {
+      const cached = await idb.get('meta', 'credits_report');
       return { data: cached ? cached.value : null, fromCache: true };
     }
   },
