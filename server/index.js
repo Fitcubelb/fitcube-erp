@@ -1380,6 +1380,21 @@ app.get('/api/dashboard/summary', async (req, res) => {
 // running the same query five times over.
 const MONEY_PERIODS = ['all_time', 'today', 'this_week', 'this_month', 'this_year'];
 
+// Same period definitions as periodCase below, but as a single WHERE-clause
+// boolean for one specific period — used where a query only ever needs to
+// look at one period at a time (e.g. a drill-down report), rather than
+// bucketing all five at once.
+function periodDateFilter(dateExpr, period) {
+  switch (period) {
+    case 'today': return `date(${dateExpr}) = date('now')`;
+    case 'this_week': return `strftime('%Y-%W', ${dateExpr}) = strftime('%Y-%W', 'now')`;
+    case 'this_month': return `strftime('%Y-%m', ${dateExpr}) = strftime('%Y-%m', 'now')`;
+    case 'this_year': return `strftime('%Y', ${dateExpr}) = strftime('%Y', 'now')`;
+    case 'all_time':
+    default: return '1=1';
+  }
+}
+
 // One CASE-per-period bucketing per money source (rather than one query per
 // period) so this stays cheap regardless of how many periods the UI wants.
 function periodCase(dateExpr, valueExpr) {
@@ -1499,36 +1514,135 @@ app.get('/api/reports/unpaid', async (req, res) => {
   ok(res, { total: clients.reduce((s, c) => s + c.total, 0), clients });
 });
 
+// Powers the Accounting/Sales "Revenue by service" section AND, with
+// ?period=, the Overview drill-down behind "Total revenue"/"Total
+// profit"/the today-week-month-year cards: which services actually made
+// the money, instead of one lump total with no way to see where it came
+// from. No period (or period=all_time) reproduces the original all-time
+// shape exactly, so the existing Accounting/Sales callers are unaffected —
+// the by_service rows just gained a `profit` field they don't read.
 app.get('/api/reports/revenue', requireOwner, async (req, res) => {
-  const byService = (
+  const period = MONEY_PERIODS.includes(req.query.period) ? req.query.period : 'all_time';
+  const sessionFilter = periodDateFilter('COALESCE(se.session_date, se.created_at)', period);
+  const packageFilter = periodDateFilter('ps.sold_at', period);
+  const salesFilter = periodDateFilter('s.sale_date', period);
+
+  const sessionByService = (
     await db.execute(`
-      SELECT COALESCE(s.name, 'Unassigned / general') as service_name,
+      SELECT COALESCE(sv.name, 'Unassigned / general') as service_name,
         SUM(CASE WHEN se.payment_state IN ('paid_now','prepaid') AND se.amount IS NOT NULL THEN se.amount ELSE 0 END) as revenue,
         COUNT(CASE WHEN se.payment_state='unpaid' THEN 1 END) as unpaid_sessions,
         COALESCE(SUM(CASE WHEN se.payment_state='unpaid' THEN se.amount ELSE 0 END),0) as unpaid_amount
       FROM session_entries se
-      LEFT JOIN services s ON s.id = se.service_id
-      GROUP BY COALESCE(s.name, 'Unassigned / general')
+      LEFT JOIN services sv ON sv.id = se.service_id
+      WHERE ${sessionFilter}
+      GROUP BY COALESCE(sv.name, 'Unassigned / general')
       HAVING revenue > 0 OR unpaid_sessions > 0
       ORDER BY revenue DESC
     `)
   ).rows;
-  const sessionRevenue = (await db.execute(`SELECT COALESCE(SUM(amount),0) as total FROM session_entries WHERE payment_state IN ('paid_now','prepaid') AND amount IS NOT NULL`)).rows[0];
-  const productRevenue = (await db.execute('SELECT COALESCE(SUM(total),0) as total FROM sales')).rows[0];
+
+  // Bundle-sale revenue belongs to a service too (e.g. a Muay Thai package
+  // sold and paid for) — folded into the same per-service rows here so a
+  // service's total reflects both pay-per-session and bundle income
+  // instead of bundles being invisible to this breakdown.
+  const packageByService = (
+    await db.execute(`
+      SELECT COALESCE(sv.name, 'Unassigned / general') as service_name, COALESCE(SUM(ps.price),0) as revenue
+      FROM package_sales ps
+      LEFT JOIN services sv ON sv.id = ps.service_id
+      WHERE ps.payment_state='paid_now' AND ${packageFilter}
+      GROUP BY COALESCE(sv.name, 'Unassigned / general')
+      HAVING revenue > 0
+    `)
+  ).rows;
+  const packageRevenueByName = new Map(packageByService.map((r) => [r.service_name, Number(r.revenue)]));
+  const serviceNames = new Set([...sessionByService.map((r) => r.service_name), ...packageRevenueByName.keys()]);
+  const byService = [...serviceNames].map((name) => {
+    const base = sessionByService.find((r) => r.service_name === name);
+    const revenue = (base ? Number(base.revenue) : 0) + (packageRevenueByName.get(name) || 0);
+    return {
+      service_name: name,
+      revenue,
+      profit: revenue, // sessions and bundles carry no cost of goods
+      unpaid_sessions: base ? Number(base.unpaid_sessions) : 0,
+      unpaid_amount: base ? Number(base.unpaid_amount) : 0,
+    };
+  });
+
+  const sessionRevenue = (await db.execute(`SELECT COALESCE(SUM(se.amount),0) as total FROM session_entries se WHERE se.payment_state IN ('paid_now','prepaid') AND se.amount IS NOT NULL AND ${sessionFilter}`)).rows[0];
+  const packageRevenue = (await db.execute(`SELECT COALESCE(SUM(ps.price),0) as total FROM package_sales ps WHERE ps.payment_state='paid_now' AND ${packageFilter}`)).rows[0];
+  const productRevenue = (await db.execute(`SELECT COALESCE(SUM(s.total),0) as total FROM sales s WHERE ${salesFilter}`)).rows[0];
+  const productCogs = (
+    await db.execute(`
+      SELECT COALESCE(SUM(si.qty * p.cost_price),0) as total
+      FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN products p ON p.id = si.product_id
+      WHERE ${salesFilter}
+    `)
+  ).rows[0];
+  const productRevenueTotal = Number(productRevenue.total);
+  const productCogsTotal = Number(productCogs.total);
+  if (productRevenueTotal > 0 || productCogsTotal > 0) {
+    byService.push({ service_name: 'Products', revenue: productRevenueTotal, profit: productRevenueTotal - productCogsTotal, unpaid_sessions: 0, unpaid_amount: 0 });
+  }
+  byService.sort((a, b) => b.revenue - a.revenue);
+
   const topProducts = (
     await db.execute(`
       SELECT p.name, SUM(si.qty) as qty_sold, SUM(si.qty * si.unit_price) as revenue
-      FROM sale_items si JOIN products p ON p.id = si.product_id
+      FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN products p ON p.id = si.product_id
+      WHERE ${salesFilter}
       GROUP BY p.name ORDER BY revenue DESC LIMIT 10
     `)
   ).rows;
+
+  const grandTotal = Number(sessionRevenue.total) + Number(packageRevenue.total) + productRevenueTotal;
+  const profitTotal = byService.reduce((s, r) => s + r.profit, 0);
   ok(res, {
+    period,
     by_service: byService,
     session_revenue_total: Number(sessionRevenue.total),
-    product_sales_total: Number(productRevenue.total),
-    grand_total: Number(sessionRevenue.total) + Number(productRevenue.total),
+    package_revenue_total: Number(packageRevenue.total),
+    product_sales_total: productRevenueTotal,
+    grand_total: grandTotal,
+    profit_total: profitTotal,
     top_products: topProducts,
   });
+});
+
+// Powers the Overview "Prepaid session credits" card as a drill-down: tap it
+// to see exactly who has credits banked and for which service, rather than
+// just one lump count with no way to see whose they are. Not owner-gated,
+// same reasoning as /api/reports/unpaid — staff can already see each
+// client's own credit balance on the Clients list and their own page.
+app.get('/api/reports/credits', async (req, res) => {
+  const rows = (
+    await db.execute(`
+      SELECT se.client_id, c.name as client_name, c.phone as client_phone,
+             se.service_id, sv.name as service_name, COUNT(*) as n
+      FROM session_entries se
+      JOIN clients c ON c.id = se.client_id
+      LEFT JOIN services sv ON sv.id = se.service_id
+      WHERE se.payment_state='prepaid' AND se.amount IS NULL AND se.redeemed_at IS NULL
+      GROUP BY se.client_id, se.service_id
+      ORDER BY c.name COLLATE NOCASE
+    `)
+  ).rows;
+
+  const byClient = new Map();
+  for (const row of rows) {
+    const cid = Number(row.client_id);
+    if (!byClient.has(cid)) {
+      byClient.set(cid, { client_id: cid, client_name: row.client_name, client_phone: row.client_phone, total: 0, by_service: [] });
+    }
+    const client = byClient.get(cid);
+    const n = Number(row.n);
+    client.total += n;
+    client.by_service.push({ service_id: row.service_id === null ? null : Number(row.service_id), service_name: row.service_name || 'General / unspecified', count: n });
+  }
+
+  const clients = [...byClient.values()].sort((a, b) => b.total - a.total);
+  ok(res, { total: clients.reduce((s, c) => s + c.total, 0), clients });
 });
 
 // ---------- Backup / restore ----------
