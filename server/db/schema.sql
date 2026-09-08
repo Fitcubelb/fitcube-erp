@@ -56,7 +56,14 @@ CREATE TABLE IF NOT EXISTS session_entries (
   -- Assigned only to rows that represent an actual checkin (a paid/unpaid
   -- entry, or a redeemed credit) — see nextReceiptNumber() in server/index.js.
   -- NULL on unredeemed credit-grant rows and on older, pre-existing rows.
-  receipt_number INTEGER
+  receipt_number INTEGER,
+  -- Which package sale granted this row, when it's a credit handed out in
+  -- bulk (see POST /api/clients/:id/packages) rather than logged one at a
+  -- time. Lets editing/deleting a package sale find exactly the credits it
+  -- granted instead of guessing from the note text. NULL for session rows
+  -- created any other way (a plain logged session, a manual "give credits"
+  -- of one, legacy imports).
+  package_sale_id INTEGER REFERENCES package_sales(id)
 );
 
 -- Simple scheduled appointments (separate from the session log above, which
@@ -238,6 +245,11 @@ CREATE TABLE IF NOT EXISTS package_sales (
   name TEXT NOT NULL,
   session_count INTEGER NOT NULL,
   price REAL NOT NULL,
+  -- Which service this bundle's credits are for (e.g. Muay Thai vs Physical
+  -- Therapy), so a client who buys a bundle of each has two separate credit
+  -- balances instead of one undifferentiated count. NULL means a general
+  -- bundle usable for any service (also what older, pre-existing sales get).
+  service_id INTEGER REFERENCES services(id),
   -- Whether the client has actually paid for this batch of credits yet.
   -- Credits are granted immediately either way; only 'paid_now' sales count
   -- as revenue, and 'unpaid' ones show up in the client's owed balance.

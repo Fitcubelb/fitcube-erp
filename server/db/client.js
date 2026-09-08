@@ -32,6 +32,12 @@ async function init() {
     "ALTER TABLE package_sales ADD COLUMN payment_state TEXT NOT NULL DEFAULT 'paid_now'",
     "ALTER TABLE session_entries ADD COLUMN receipt_number INTEGER",
     "ALTER TABLE clients ADD COLUMN tier TEXT NOT NULL DEFAULT 'Regular'",
+    // Per-service bundle credits (see server/db/schema.sql for why): existing
+    // package sales and the credits they already granted come through as
+    // NULL, i.e. "general" — still usable for any service, just not split
+    // out. Only newly sold/redeemed ones get tagged going forward.
+    "ALTER TABLE package_sales ADD COLUMN service_id INTEGER REFERENCES services(id)",
+    "ALTER TABLE session_entries ADD COLUMN package_sale_id INTEGER REFERENCES package_sales(id)",
   ];
   for (const m of migrations) {
     try {
