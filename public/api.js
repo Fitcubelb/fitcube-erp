@@ -164,10 +164,12 @@ const api = {
     return result;
   },
 
-  // Redeems the client's oldest available prepaid credit for a visit — see
-  // POST /api/clients/:id/redeem-credit. Optimistically marks the oldest
-  // still-unredeemed credit in the cached bundle as used, the same way the
-  // server picks it, so it disappears from "credits left" immediately.
+  // Redeems one of the client's available prepaid credits for a visit — see
+  // POST /api/clients/:id/redeem-credit. Optimistically marks a still-
+  // unredeemed credit in the cached bundle as used the same way the server
+  // picks it — the oldest one tagged for the requested service, falling back
+  // to the oldest untagged "general" one — so a Muay Thai visit can never
+  // appear to consume a Physical Therapy credit, even before the next sync.
   async redeemCredit(clientId, payload) {
     const result = await mutate('POST', `/api/clients/${clientId}/redeem-credit`, payload);
     let service_name = null;
@@ -177,12 +179,18 @@ const api = {
     }
     await patchClientDetailCache(clientId, (bundle) => {
       const sessions = bundle.sessions || [];
-      const idx = sessions
-        .filter((s) => s.payment_state === 'prepaid' && s.amount === null && !s.redeemed_at)
-        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0];
-      if (idx) {
+      const available = sessions.filter((s) => s.payment_state === 'prepaid' && s.amount === null && !s.redeemed_at);
+      const oldest = (list) => list.sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0];
+      let target = null;
+      if (payload.service_id) {
+        const matching = available.filter((s) => String(s.service_id) === String(payload.service_id));
+        target = matching.length ? oldest(matching) : oldest(available.filter((s) => !s.service_id));
+      } else {
+        target = oldest(available);
+      }
+      if (target) {
         bundle.sessions = sessions.map((s) =>
-          s === idx
+          s === target
             ? {
                 ...s,
                 session_date: new Date().toISOString(),
@@ -197,6 +205,16 @@ const api = {
       }
     });
     return result;
+  },
+
+  // Pays down what a client already owes (see POST .../settle-balance) —
+  // needs the server's current unpaid state to decide what to apply the
+  // payment against, so unlike other writes this isn't queued for offline
+  // replay (same reasoning as restoreBackup/importClients below). Not
+  // reflected optimistically either — the caller re-renders from a fresh
+  // fetch once this resolves, which only happens when it succeeded online.
+  async settleBalance(clientId, payload) {
+    return rawFetch('POST', `/api/clients/${clientId}/settle-balance`, payload);
   },
 
   async updateSession(sessionId, payload, clientId) {
@@ -538,6 +556,48 @@ const api = {
       );
     });
     return result;
+  },
+
+  // Full edit of a bundle sold to a client (name/service/count/price/paid
+  // state/note) — fixing a mistake, not just flipping paid/unpaid. Changing
+  // the session count can fail server-side (can't remove credits already
+  // used), so the caller is expected to await this and show that error
+  // rather than treating it as fire-and-forget.
+  async updatePackageSale(id, payload, clientId) {
+    const result = await mutate('PUT', `/api/package-sales/${id}`, payload);
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.packages = (bundle.packages || []).map((p) =>
+        String(p.id) === String(id) ? { ...p, ...payload, _pending: result.offline || p._pending } : p
+      );
+      // The precise credit rows a session_count change adds/removes are only
+      // known server-side; the cached bundle's session list is left as-is
+      // here and catches up on the next successful fetch.
+    });
+    return result;
+  },
+
+  async deletePackageSale(id, clientId) {
+    const result = await mutate('DELETE', `/api/package-sales/${id}`, undefined);
+    await patchClientDetailCache(clientId, (bundle) => {
+      bundle.packages = (bundle.packages || []).filter((p) => String(p.id) !== String(id));
+      bundle.sessions = (bundle.sessions || []).filter(
+        (s) => !(String(s.package_sale_id) === String(id) && s.payment_state === 'prepaid' && s.amount === null && !s.redeemed_at)
+      );
+    });
+    return result;
+  },
+
+  // Powers the Overview "Unpaid balance" drill-down — who owes money and for
+  // what service, not just one lump total. See GET /api/reports/unpaid.
+  async unpaidReport() {
+    try {
+      const data = await get('/api/reports/unpaid');
+      await idb.put('meta', { key: 'unpaid_report', value: data });
+      return { data, fromCache: false };
+    } catch {
+      const cached = await idb.get('meta', 'unpaid_report');
+      return { data: cached ? cached.value : null, fromCache: true };
+    }
   },
 
   async dashboardSummary() {

@@ -198,6 +198,7 @@ async function render() {
 
   if (route === 'dashboard') return renderDashboard();
   if (route === 'accounting') return renderAccounting();
+  if (route === 'unpaid') return renderUnpaid();
   // #/clients/new?name=…&phone=… — lets an iOS Shortcut (or any link) hand a
   // contact straight into the New client form, which is the closest thing
   // iPhone allows to picking from the address book inside a web app.
@@ -242,7 +243,7 @@ async function renderDashboard() {
     <div class="grid-2">
       <div class="card"><div class="stat">${data.appointments_today}</div><div class="stat-label">Appointments today</div></div>
       <div class="card" style="cursor:pointer" onclick="location.hash='#/clients'"><div class="stat">${data.active_clients}</div><div class="stat-label">Active clients</div></div>
-      <div class="card"><div class="stat" style="color:var(--unpaid)">${money(data.unpaid_total)}</div><div class="stat-label">Unpaid balance (${data.unpaid_entries} entries)</div></div>
+      <div class="card" style="cursor:pointer" onclick="location.hash='#/unpaid'"><div class="stat" style="color:var(--unpaid)">${money(data.unpaid_total)}</div><div class="stat-label">Unpaid balance (${data.unpaid_entries} entries) — tap to see who</div></div>
       <div class="card"><div class="stat" style="color:var(--credit)">${data.prepaid_credit_sessions}</div><div class="stat-label">Prepaid session credits</div></div>
     </div>
     ${data.low_stock_products > 0 ? `<div class="card" style="border-color:var(--unpaid)">⚠ ${data.low_stock_products} product(s) at or below reorder level — check Stock.</div>` : ''}
@@ -342,6 +343,68 @@ async function renderAccounting() {
   } catch (err) {
     document.getElementById('acct-revenue-report').innerHTML = `<div class="empty">${esc(err.message)}</div>`;
   }
+}
+
+// Drill-down behind Overview's "Unpaid balance" card: who owes money, how
+// much each of them owes per service, and a one-tap way to mark any of it
+// paid — instead of the single lump total that used to be the only thing
+// shown on the home screen.
+async function renderUnpaid() {
+  viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Unpaid balance</h1><div class="empty">Loading…</div>`;
+  const { data, fromCache } = await api.unpaidReport();
+  if (!data) {
+    viewEl.innerHTML = `<button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button><h1>Unpaid balance</h1><div class="empty">No data yet — connect once online to load this page.</div>`;
+    return;
+  }
+  paintUnpaid(data, fromCache);
+}
+
+function paintUnpaid(data, fromCache) {
+  viewEl.innerHTML = `
+    <button class="btn secondary" onclick="location.hash='#/dashboard'" style="margin-bottom:10px">← Overview</button>
+    <h1>Unpaid balance</h1>
+    ${fromCache ? `<div class="sync-banner">Showing last saved data — you're offline.</div>` : ''}
+    <div class="card"><div class="stat" style="color:var(--unpaid)">${money(data.total)}</div><div class="stat-label">Owed across ${data.clients.length} client${data.clients.length === 1 ? '' : 's'}</div></div>
+    <div id="unpaid-rows">
+      ${data.clients.length ? data.clients.map((c) => unpaidClientHtml(c)).join('') : '<div class="empty">Nobody owes anything right now.</div>'}
+    </div>
+  `;
+  document.querySelectorAll('[data-unpaid-client]').forEach((el) => {
+    el.addEventListener('click', () => { location.hash = '#/clients/' + el.dataset.unpaidClient; });
+  });
+  document.querySelectorAll('[data-unpaid-mark-paid]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const [type, itemId, clientId] = btn.dataset.unpaidMarkPaid.split(':');
+      if (type === 'session') await api.updateSession(itemId, { payment_state: 'paid_now' }, clientId);
+      else await api.markPackagePaid(itemId, clientId);
+      renderUnpaid();
+    });
+  });
+}
+
+function unpaidClientHtml(c) {
+  return `
+    <div class="card">
+      <div class="session-row" data-unpaid-client="${c.client_id}" style="cursor:pointer">
+        <div>
+          <div style="font-weight:600">${esc(c.client_name)}</div>
+          <div class="sub">${esc(c.client_phone || 'No phone on file')}</div>
+        </div>
+        <div class="badge unpaid">${money(c.total)}</div>
+      </div>
+      ${c.by_service.map((b) => `
+        <div class="session-row" style="padding-left:10px">
+          <div class="sub">${esc(b.service_name)}</div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+            <span class="badge unpaid">${money(b.amount)}</span>
+            ${b.items.map((item) => `<button class="btn secondary" style="padding:4px 8px;font-size:0.72rem" data-unpaid-mark-paid="${item.type}:${item.id}:${c.client_id}">Mark ${money(item.amount)} paid</button>`).join('')}
+          </div>
+        </div>
+      `).join('')}
+      ${c.unknown_amount_sessions ? `<div class="session-row" style="padding-left:10px"><div class="sub">Amount not set</div><span class="badge unpaid">${c.unknown_amount_sessions} session${c.unknown_amount_sessions === 1 ? '' : 's'}</span></div>` : ''}
+    </div>
+  `;
 }
 
 // ---------- backups ----------
@@ -612,11 +675,16 @@ function clientBadges(c) {
   const parts = [];
   const unpaidTotal = (Number(b.unpaid_amount) || 0);
   const unpaidNoAmt = Number(b.unpaid_sessions_no_amount) || 0;
-  const credits = Number(b.prepaid_session_credits) || 0;
   const days = daysSince(b.last_activity);
   if (unpaidTotal > 0) parts.push(`<span class="badge unpaid">owes ${money(unpaidTotal)}</span>`);
   if (unpaidNoAmt > 0) parts.push(`<span class="badge unpaid">${unpaidNoAmt} unpaid session${unpaidNoAmt > 1 ? 's' : ''}</span>`);
-  if (credits > 0) parts.push(`<span class="badge credit">${credits} credit${credits > 1 ? 's' : ''}</span>`);
+  // One badge per service rather than a single lumped count — a client with
+  // 3 Muay Thai + 5 Physical Therapy credits should read as two balances,
+  // not "8 credits" with no way to tell what's left of which.
+  const byService = b.credits_by_service || [];
+  byService.forEach((cs) => {
+    if (cs.count > 0) parts.push(`<span class="badge credit">${cs.count} ${esc(cs.service_name)}</span>`);
+  });
   if (days !== null && days > INACTIVE_DAYS) parts.push(`<span class="badge neutral">at risk</span>`);
   return parts.join(' ');
 }
@@ -783,6 +851,85 @@ function openAddClientModal(prefill = {}) {
   });
 }
 
+// Groups a client's sessions + bundle sales by service — the same info that
+// used to only exist as one flat "owed" total and one flat "credits" count,
+// which is exactly what hid the fact that a client's 3 Muay Thai credits and
+// 5 Physical Therapy credits were two separate balances, and made it
+// impossible to tell paid vs. unpaid apart per service. Returns one row per
+// service that has ANY activity (paid, unpaid, or credits) for this client,
+// whether or not they ever bought a bundle for it, plus a trailing "General
+// / unspecified" row for anything with no service picked.
+function serviceBreakdown(sessions, packages) {
+  const buckets = new Map();
+  const bucketFor = (serviceId, serviceName) => {
+    const key = serviceId === null || serviceId === undefined || serviceId === '' ? 'general' : String(serviceId);
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        service_id: key === 'general' ? null : serviceId,
+        service_name: key === 'general' ? 'General / unspecified' : (serviceName || 'General / unspecified'),
+        credits: 0,
+        paidSessions: 0, paidSessionsTotal: 0,
+        unpaidSessions: 0, unpaidSessionsTotal: 0, unpaidUnknown: 0,
+        bundlesPaid: 0, bundlesPaidTotal: 0,
+        bundlesUnpaid: 0, bundlesUnpaidTotal: 0,
+      });
+    }
+    return buckets.get(key);
+  };
+  (sessions || []).forEach((s) => {
+    const b = bucketFor(s.service_id, s.service_name);
+    if (s.payment_state === 'paid_now') {
+      b.paidSessions++;
+      b.paidSessionsTotal += Number(s.amount) || 0;
+    } else if (s.payment_state === 'unpaid') {
+      if (s.amount === null || s.amount === undefined) b.unpaidUnknown++;
+      else { b.unpaidSessions++; b.unpaidSessionsTotal += Number(s.amount) || 0; }
+    } else if (s.payment_state === 'prepaid' && s.amount === null && !s.redeemed_at) {
+      b.credits++;
+    }
+  });
+  (packages || []).forEach((p) => {
+    const b = bucketFor(p.service_id, p.service_name);
+    if (p.payment_state === 'unpaid') { b.bundlesUnpaid++; b.bundlesUnpaidTotal += Number(p.price) || 0; }
+    else { b.bundlesPaid++; b.bundlesPaidTotal += Number(p.price) || 0; }
+  });
+  return [...buckets.values()]
+    .filter((b) => b.credits || b.paidSessions || b.unpaidSessions || b.unpaidUnknown || b.bundlesPaid || b.bundlesUnpaid)
+    .sort((a, b) => {
+      // General last; otherwise whoever owes the most (or has the most
+      // going on) floats to the top since that's what needs attention.
+      if (a.service_id === null) return 1;
+      if (b.service_id === null) return -1;
+      const score = (x) => (x.unpaidSessionsTotal + x.bundlesUnpaidTotal) * 1000 + x.credits + x.paidSessions;
+      return score(b) - score(a);
+    });
+}
+
+function serviceBreakdownHtml(sessions, packages) {
+  const rows = serviceBreakdown(sessions, packages);
+  if (!rows.length) return '';
+  return `
+    <h2>By service</h2>
+    <div class="card">
+      ${rows.map((b) => {
+        const bits = [];
+        if (b.credits > 0) bits.push(`<span class="badge credit">${b.credits} credit${b.credits === 1 ? '' : 's'} left</span>`);
+        if (b.paidSessions > 0) bits.push(`<span class="badge neutral">${b.paidSessions} paid (${money(b.paidSessionsTotal)})</span>`);
+        if (b.unpaidSessions > 0 || b.bundlesUnpaid > 0) {
+          const total = b.unpaidSessionsTotal + b.bundlesUnpaidTotal;
+          const parts = [];
+          if (b.unpaidSessions > 0) parts.push(`${b.unpaidSessions} session${b.unpaidSessions === 1 ? '' : 's'}`);
+          if (b.bundlesUnpaid > 0) parts.push(`${b.bundlesUnpaid} bundle${b.bundlesUnpaid === 1 ? '' : 's'}`);
+          bits.push(`<span class="badge unpaid">${money(total)} owed (${parts.join(' + ')})</span>`);
+        }
+        if (b.unpaidUnknown > 0) bits.push(`<span class="badge unpaid">${b.unpaidUnknown} unpaid, amount not set</span>`);
+        if (b.bundlesPaid > 0) bits.push(`<span class="badge neutral">${b.bundlesPaid} bundle${b.bundlesPaid === 1 ? '' : 's'} purchased (${money(b.bundlesPaidTotal)})</span>`);
+        return `<div class="session-row"><div>${esc(b.service_name)}</div><div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">${bits.join(' ')}</div></div>`;
+      }).join('')}
+    </div>
+  `;
+}
+
 async function renderClientDetail(id) {
   viewEl.innerHTML = `<div class="empty">Loading…</div>`;
   const { data: c, fromCache } = await api.getClient(id);
@@ -821,6 +968,8 @@ async function renderClientDetail(id) {
       <button class="btn block" id="record-payment-btn">Record payment</button>
       <button class="btn secondary block" id="add-appt-btn">Schedule</button>
     </div>
+
+    ${serviceBreakdownHtml(sessions, packages)}
 
     <h2>Progress photos</h2>
     <div class="photo-strip" id="photo-strip">
@@ -865,7 +1014,7 @@ async function renderClientDetail(id) {
   `;
 
   document.getElementById('edit-client-btn').addEventListener('click', () => openEditClientModal(c));
-  document.getElementById('record-payment-btn').addEventListener('click', () => openRecordPaymentModal(c.id, credits));
+  document.getElementById('record-payment-btn').addEventListener('click', () => openRecordPaymentModal(c.id, sessions, packages));
   document.getElementById('add-appt-btn').addEventListener('click', () => openAddAppointmentModal(c.id));
   const remindBtn = document.getElementById('remind-btn');
   if (remindBtn) remindBtn.addEventListener('click', () => {
@@ -921,6 +1070,33 @@ async function renderClientDetail(id) {
       renderClientDetail(id);
     });
   });
+  viewEl.querySelectorAll('[data-edit-session]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const s = sessions.find((x) => String(x.id) === btn.dataset.editSession);
+      if (s) openEditSessionModal(s, id);
+    });
+  });
+  viewEl.querySelectorAll('[data-edit-package]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const p = packages.find((x) => String(x.id) === btn.dataset.editPackage);
+      if (p) openEditPackageSaleModal(p, id);
+    });
+  });
+  viewEl.querySelectorAll('[data-remove-package]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const p = packages.find((x) => String(x.id) === btn.dataset.removePackage);
+      if (!confirm(`Delete "${p ? p.name : 'this bundle'}"? Any of its credits your client hasn't used yet will be removed too.`)) return;
+      try {
+        await api.deletePackageSale(btn.dataset.removePackage, id);
+      } catch (err) {
+        alert(err.message || 'Could not delete this bundle.');
+      }
+      renderClientDetail(id);
+    });
+  });
 }
 
 function sessionRowHtml(s) {
@@ -943,6 +1119,7 @@ function sessionRowHtml(s) {
       <div style="display:flex;gap:6px;align-items:center">
         ${stateBadge}
         ${s.payment_state === 'unpaid' ? `<button class="btn secondary" style="padding:6px 10px;font-size:0.75rem" data-mark-paid="${s.id}">Mark paid</button>` : ''}
+        <button class="btn secondary" style="padding:6px 8px;font-size:0.75rem" data-edit-session="${s.id}" title="Edit">✎</button>
         <button class="btn danger" style="padding:6px 8px;font-size:0.75rem" data-remove-session="${s.id}">×</button>
       </div>
     </div>`;
@@ -955,14 +1132,147 @@ function packageRowHtml(p) {
   return `
     <div class="session-row">
       <div>
-        <div>${esc(p.name)}${p._pending ? ' <span class="pending-note">(pending sync)</span>' : ''}</div>
+        <div>${esc(p.name)}${p.service_name ? ` · ${esc(p.service_name)}` : ''}${p._pending ? ' <span class="pending-note">(pending sync)</span>' : ''}</div>
         <div class="sub">${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} · ${fmtDate(p.sold_at || p.created_at)}</div>
       </div>
       <div style="display:flex;gap:6px;align-items:center">
         ${badge}
         ${p.payment_state === 'unpaid' ? `<button class="btn secondary" style="padding:6px 10px;font-size:0.75rem" data-mark-paid-package="${p.id}">Mark paid</button>` : ''}
+        <button class="btn secondary" style="padding:6px 8px;font-size:0.75rem" data-edit-package="${p.id}" title="Edit">✎</button>
+        <button class="btn danger" style="padding:6px 8px;font-size:0.75rem" data-remove-package="${p.id}">×</button>
       </div>
     </div>`;
+}
+
+// Converts a stored session_date/sold_at ("YYYY-MM-DD HH:MM:SS" or ISO, or
+// nothing at all) into the value a <input type="datetime-local"> expects, so
+// editing a mistake doesn't first require re-typing a date that was already
+// right.
+function toDatetimeLocalValue(d) {
+  if (!d) return '';
+  const dt = new Date(d.includes('T') || d.includes(' ') ? d.replace(' ', 'T') + (d.includes('Z') ? '' : 'Z') : d);
+  if (isNaN(dt)) return '';
+  const tz = dt.getTimezoneOffset();
+  return new Date(dt.getTime() - tz * 60000).toISOString().slice(0, 16);
+}
+
+// Fixing a mistake in a logged session: wrong service, wrong amount, marked
+// paid/unpaid by accident, wrong date, or it shouldn't exist at all.
+async function openEditSessionModal(s, clientId) {
+  const { data: services } = await api.listServices();
+  openModal(`
+    <h3>Edit session</h3>
+    <label>Service</label>
+    <select id="f-service"><option value="">— none / general —</option>${services.map((sv) => `<option value="${sv.id}" ${String(s.service_id) === String(sv.id) ? 'selected' : ''}>${esc(sv.name)}</option>`).join('')}</select>
+    <label>Status</label>
+    <select id="f-state">
+      <option value="paid_now" ${s.payment_state === 'paid_now' ? 'selected' : ''}>Paid</option>
+      <option value="unpaid" ${s.payment_state === 'unpaid' ? 'selected' : ''}>Unpaid / owed</option>
+      <option value="prepaid" ${s.payment_state === 'prepaid' ? 'selected' : ''}>Prepaid credit</option>
+    </select>
+    <label>Amount (whole dollars, leave blank if none)</label>
+    <input id="f-amount" type="number" step="1" min="0" inputmode="numeric" pattern="[0-9]*" value="${s.amount === null || s.amount === undefined ? '' : s.amount}" />
+    <label>Date</label>
+    <input id="f-date" type="datetime-local" value="${toDatetimeLocalValue(s.session_date || s.created_at)}" />
+    <label>Note</label><input id="f-note" value="${esc(s.note || '')}" placeholder="Optional" />
+    <div class="btn-row">
+      <button class="btn block" id="f-save">Save</button>
+      <button class="btn danger" id="f-delete">Delete entry</button>
+    </div>
+  `);
+  guardedClick('f-save', async () => {
+    const amountRaw = document.getElementById('f-amount').value;
+    const amount = amountRaw === '' ? null : Math.round(Number(amountRaw));
+    if (amount !== null && (Number.isNaN(amount) || amount < 0)) {
+      alert('Amount must be a whole number, 0 or more, or left blank.');
+      return;
+    }
+    await api.updateSession(s.id, {
+      service_id: document.getElementById('f-service').value || null,
+      payment_state: document.getElementById('f-state').value,
+      amount,
+      session_date: document.getElementById('f-date').value || null,
+      note: document.getElementById('f-note').value.trim(),
+    }, clientId);
+    closeModal();
+    renderClientDetail(clientId);
+  });
+  document.getElementById('f-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this session entry? This cannot be undone.')) return;
+    await api.deleteSession(s.id, clientId);
+    closeModal();
+    renderClientDetail(clientId);
+  });
+}
+
+// Fixing a mistake in a bundle sold: wrong service, wrong price, wrong
+// session count, marked paid/unpaid by accident, or it shouldn't have been
+// sold at all. Shrinking the session count removes that many still-unused
+// credits (oldest-added first) and the server refuses if the client has
+// already used more credits than the new count would leave.
+async function openEditPackageSaleModal(p, clientId) {
+  const { data: services } = await api.listServices();
+  openModal(`
+    <h3>Edit bundle sold</h3>
+    <label>Name</label>
+    <input id="f-name" value="${esc(p.name)}" />
+    <label>Service</label>
+    <select id="f-service"><option value="">— general / any service —</option>${services.map((sv) => `<option value="${sv.id}" ${String(p.service_id) === String(sv.id) ? 'selected' : ''}>${esc(sv.name)}</option>`).join('')}</select>
+    <label>Number of sessions in the bundle</label>
+    <input id="f-count" type="number" min="1" step="1" value="${p.session_count}" />
+    <label>Price</label>
+    <input id="f-price" type="number" min="0" step="0.01" value="${p.price}" />
+    <label>Has the client paid?</label>
+    <div class="segmented" id="f-paid">
+      <button data-paid="yes" class="${p.payment_state !== 'unpaid' ? 'active' : ''}">Paid</button>
+      <button data-paid="no" class="${p.payment_state === 'unpaid' ? 'active' : ''}">Owes</button>
+    </div>
+    <label>Note</label><input id="f-note" value="${esc(p.note || '')}" placeholder="Optional" />
+    <div class="btn-row">
+      <button class="btn block" id="f-save">Save</button>
+      <button class="btn danger" id="f-delete">Delete this bundle</button>
+    </div>
+  `);
+  document.querySelectorAll('#f-paid button').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('#f-paid button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+    });
+  });
+  guardedClick('f-save', async () => {
+    const name = document.getElementById('f-name').value.trim();
+    if (!name) { alert('Name is required.'); return; }
+    const count = Number(document.getElementById('f-count').value);
+    const price = Number(document.getElementById('f-price').value);
+    if (!Number.isFinite(count) || count <= 0) { alert('Number of sessions must be 1 or more.'); return; }
+    if (!Number.isFinite(price) || price < 0) { alert('Price must be 0 or more.'); return; }
+    try {
+      await api.updatePackageSale(p.id, {
+        name,
+        service_id: document.getElementById('f-service').value || null,
+        session_count: Math.floor(count),
+        price,
+        payment_state: document.querySelector('#f-paid button.active').dataset.paid === 'yes' ? 'paid_now' : 'unpaid',
+        note: document.getElementById('f-note').value.trim(),
+      }, clientId);
+    } catch (err) {
+      alert(err.message || 'Could not save this bundle.');
+      return;
+    }
+    closeModal();
+    renderClientDetail(clientId);
+  });
+  document.getElementById('f-delete').addEventListener('click', async () => {
+    if (!confirm(`Delete "${p.name}"? Any of its credits your client hasn't used yet will be removed too.`)) return;
+    try {
+      await api.deletePackageSale(p.id, clientId);
+    } catch (err) {
+      alert(err.message || 'Could not delete this bundle.');
+      return;
+    }
+    closeModal();
+    renderClientDetail(clientId);
+  });
 }
 
 function openEditClientModal(c) {
@@ -1356,13 +1666,44 @@ function openEditPackageModal(p) {
 // how many they have left), or giving them a fresh batch of credits — a mode
 // switch at the top swaps which fields show, instead of four separate flows
 // each asking for their own set of fields.
-async function openRecordPaymentModal(clientId, creditsAvailable) {
-  const [{ data: services }, { data: packages }] = await Promise.all([api.listServices(), api.listPackages()]);
-  const hasPresets = !!(packages && packages.length);
+//
+// `sessions`/`packages` (the client's full logs, already loaded by the
+// client detail page) are used to show, right on the service dropdown, how
+// many credits are left per service and what's currently owed per service —
+// so "Paid $100" against an existing $100 balance settles it instead of
+// silently piling up as a second, disconnected entry (see settle-balance on
+// the server for the fix itself).
+async function openRecordPaymentModal(clientId, sessions, packages) {
+  const [{ data: services }, { data: presets }] = await Promise.all([api.listServices(), api.listPackages()]);
+  const hasPresets = !!(presets && presets.length);
+  const breakdown = serviceBreakdown(sessions, packages);
+  const byServiceKey = new Map(breakdown.map((b) => [b.service_id === null ? '' : String(b.service_id), b]));
+  const totalCredits = breakdown.reduce((sum, b) => sum + b.credits, 0);
+
+  const serviceOptionLabel = (id, name) => {
+    const b = byServiceKey.get(id === null ? '' : String(id));
+    const bits = [];
+    if (b) {
+      if (b.credits > 0) bits.push(`${b.credits} credit${b.credits === 1 ? '' : 's'}`);
+      const owed = b ? b.unpaidSessionsTotal + b.bundlesUnpaidTotal : 0;
+      if (owed > 0) bits.push(`owes ${money(owed)}`);
+    }
+    return bits.length ? `${name} — ${bits.join(', ')}` : name;
+  };
+  const allServiceOptions = [{ id: '', name: '— none / general —' }, ...services.map((s) => ({ id: String(s.id), name: s.name }))]
+    .map((s) => `<option value="${s.id}">${esc(serviceOptionLabel(s.id === '' ? null : s.id, s.name))}</option>`)
+    .join('');
+  // Only services (or "general") that actually have an unredeemed credit —
+  // no point offering to redeem one that isn't there.
+  const creditServiceOptions = [{ id: '', name: 'General' }, ...services.map((s) => ({ id: String(s.id), name: s.name }))]
+    .filter((s) => (byServiceKey.get(s.id) || {}).credits > 0)
+    .map((s) => `<option value="${s.id}">${esc(serviceOptionLabel(s.id === '' ? null : s.id, s.name))}</option>`)
+    .join('');
+
   const modes = [
     { key: 'paid', label: 'Paid' },
     { key: 'owes', label: 'Owes' },
-    ...(creditsAvailable > 0 ? [{ key: 'credit', label: `Use a credit (${creditsAvailable} left)` }] : []),
+    ...(totalCredits > 0 ? [{ key: 'credit', label: `Use a credit (${totalCredits} left)` }] : []),
     { key: 'give', label: 'Give credits' },
   ];
   openModal(`
@@ -1373,7 +1714,8 @@ async function openRecordPaymentModal(clientId, creditsAvailable) {
 
     <div id="rp-session-fields">
       <label>Service</label>
-      <select id="f-service"><option value="">— none / general —</option>${services.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+      <select id="f-service">${allServiceOptions}</select>
+      <div id="rp-owed-hint" class="sub" style="margin:-4px 0 10px"></div>
       <div id="rp-amount-wrap">
         <label>Amount (whole dollars)</label>
         <input id="f-amount" type="number" step="1" min="0" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 30" />
@@ -1386,7 +1728,7 @@ async function openRecordPaymentModal(clientId, creditsAvailable) {
       ${hasPresets ? `
       <label>Package</label>
       <select id="f-package">
-        ${packages.map((p) => `<option value="${p.id}" data-name="${esc(p.name)}" data-count="${p.session_count}" data-price="${p.price}">${esc(p.name)} — ${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} for ${money(p.price)}</option>`).join('')}
+        ${presets.map((p) => `<option value="${p.id}" data-name="${esc(p.name)}" data-count="${p.session_count}" data-price="${p.price}">${esc(p.name)} — ${p.session_count} session${Number(p.session_count) === 1 ? '' : 's'} for ${money(p.price)}</option>`).join('')}
         <option value="custom">Custom…</option>
       </select>
       ` : `<div class="sub" style="margin-bottom:10px;line-height:1.45">No saved packages yet — set some up in ⚙ Settings → Session packages, or give a one-off below.</div>`}
@@ -1395,6 +1737,9 @@ async function openRecordPaymentModal(clientId, creditsAvailable) {
         <label>Number of sessions</label><input id="f-count" type="number" min="1" step="1" placeholder="e.g. 6" />
         <label>Price</label><input id="f-price" type="number" min="0" step="0.01" placeholder="e.g. 250" />
       </div>
+      <label>Which service is this bundle for?</label>
+      <select id="f-give-service">${services.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}<option value="">General / any service</option></select>
+      ${services.length > 1 ? `<div class="sub" style="margin:-4px 0 10px">Picking a service keeps these credits separate from any other bundle — e.g. Muay Thai credits won't get used up by a Physical Therapy visit.</div>` : ''}
       <label>Has the client paid?</label>
       <div class="segmented" id="rp-give-paid">
         <button data-paid="yes" class="active">Paid</button>
@@ -1410,13 +1755,29 @@ async function openRecordPaymentModal(clientId, creditsAvailable) {
   const sessionFields = document.getElementById('rp-session-fields');
   const giveFields = document.getElementById('rp-give-fields');
   const amountWrap = document.getElementById('rp-amount-wrap');
+  const serviceSelect = document.getElementById('f-service');
+  const owedHint = document.getElementById('rp-owed-hint');
+  let currentMode = 'paid';
+
+  const updateOwedHint = () => {
+    const b = byServiceKey.get(serviceSelect.value || '');
+    const owed = b ? b.unpaidSessionsTotal + b.bundlesUnpaidTotal : 0;
+    owedHint.textContent = currentMode === 'paid' && owed > 0
+      ? `Currently owes ${money(owed)} for this — entering that amount here will settle it.`
+      : '';
+  };
   const setMode = (mode) => {
+    currentMode = mode;
     modeBtns.forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
     sessionFields.style.display = mode === 'give' ? 'none' : '';
     giveFields.style.display = mode === 'give' ? '' : 'none';
     amountWrap.style.display = mode === 'credit' ? 'none' : '';
+    serviceSelect.innerHTML = mode === 'credit' ? (creditServiceOptions || `<option value="">General</option>`) : allServiceOptions;
+    updateOwedHint();
   };
   modeBtns.forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  serviceSelect.addEventListener('change', updateOwedHint);
+  updateOwedHint();
 
   document.getElementById('rp-note-toggle').addEventListener('click', (e) => {
     document.getElementById('rp-note-wrap').style.display = '';
@@ -1443,7 +1804,12 @@ async function openRecordPaymentModal(clientId, creditsAvailable) {
     const note = document.getElementById('f-note').value.trim() || null;
 
     if (mode === 'credit') {
-      await api.redeemCredit(clientId, { service_id: serviceId, note });
+      try {
+        await api.redeemCredit(clientId, { service_id: serviceId, note });
+      } catch (err) {
+        alert(err.message || 'Could not redeem a credit.');
+        return;
+      }
     } else if (mode === 'give') {
       let payload;
       if (packageSelect && packageSelect.value !== 'custom') {
@@ -1464,6 +1830,7 @@ async function openRecordPaymentModal(clientId, creditsAvailable) {
         }
         payload = { name, session_count: Math.floor(count), price };
       }
+      payload.service_id = document.getElementById('f-give-service').value || null;
       const paid = document.querySelector('#rp-give-paid button.active').dataset.paid === 'yes';
       payload.payment_state = paid ? 'paid_now' : 'unpaid';
       payload.note = document.getElementById('f-give-note').value.trim() || null;
@@ -1475,12 +1842,28 @@ async function openRecordPaymentModal(clientId, creditsAvailable) {
         alert('Amount must be a whole number, 0 or more.');
         return;
       }
-      await api.recordPayment(clientId, {
-        service_id: serviceId,
-        payment_state: mode === 'paid' ? 'paid_now' : 'unpaid',
-        amount,
-        note,
-      });
+      if (mode === 'paid' && amount && amount > 0) {
+        // Pays down whatever's already unpaid for this service (or overall,
+        // if no service picked) before logging anything new — see
+        // settle-balance on the server for exactly why this matters.
+        try {
+          await api.settleBalance(clientId, { service_id: serviceId, amount, note });
+        } catch (err) {
+          if (err instanceof NetworkDownError) {
+            alert("Can't record a payment against the balance while offline — connect and try again.");
+          } else {
+            alert(err.message || 'Could not record that payment.');
+          }
+          return;
+        }
+      } else {
+        await api.recordPayment(clientId, {
+          service_id: serviceId,
+          payment_state: mode === 'paid' ? 'paid_now' : 'unpaid',
+          amount,
+          note,
+        });
+      }
     }
     closeModal();
     renderClientDetail(clientId);
