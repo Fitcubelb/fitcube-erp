@@ -338,6 +338,31 @@ app.get('/api/clients', async (req, res) => {
     byClient[cid].unpaid_amount = (Number(byClient[cid].unpaid_amount) || 0) + Number(p.total);
   }
 
+  // Credits left, split per service — a client with 3 Muay Thai + 5 Physical
+  // Therapy credits should read as two separate balances everywhere, not one
+  // "8 credits" total (see redeem-credit for how a visit picks the right
+  // one). service_id NULL groups as "General".
+  const creditsByService = (
+    await db.execute(`
+      SELECT se.client_id, se.service_id, sv.name AS service_name, COUNT(*) AS n
+      FROM session_entries se LEFT JOIN services sv ON sv.id = se.service_id
+      WHERE se.payment_state='prepaid' AND se.amount IS NULL AND se.redeemed_at IS NULL
+      GROUP BY se.client_id, se.service_id
+    `)
+  ).rows;
+  const creditsByClient = {};
+  for (const row of creditsByService) {
+    const cid = Number(row.client_id);
+    (creditsByClient[cid] = creditsByClient[cid] || []).push({
+      service_id: row.service_id === null ? null : Number(row.service_id),
+      service_name: row.service_name || 'General',
+      count: Number(row.n),
+    });
+  }
+  for (const cid of Object.keys(byClient)) {
+    byClient[cid].credits_by_service = creditsByClient[cid] || [];
+  }
+
   ok(res, rows.map((c) => ({ ...c, balance: byClient[Number(c.id)] || null })));
 });
 
@@ -410,7 +435,9 @@ app.get('/api/clients/:id', async (req, res) => {
   ).rows;
   const packages = (
     await db.execute({
-      sql: `SELECT * FROM package_sales WHERE client_id=? ORDER BY sold_at DESC, id DESC`,
+      sql: `SELECT ps.*, sv.name as service_name FROM package_sales ps
+            LEFT JOIN services sv ON sv.id = ps.service_id
+            WHERE ps.client_id=? ORDER BY ps.sold_at DESC, ps.id DESC`,
       args: [req.params.id],
     })
   ).rows;
@@ -816,7 +843,7 @@ app.delete('/api/packages/:id', async (req, res) => {
 // a one-off), so this route trusts them rather than re-deriving from
 // package_id — the same way /api/sales trusts the unit_price it's given.
 app.post('/api/clients/:id/packages', async (req, res) => {
-  const { package_id, name, session_count, price, note, payment_state } = req.body || {};
+  const { package_id, name, session_count, price, note, payment_state, service_id } = req.body || {};
   if (!name || !String(name).trim()) return bad(res, 'name is required');
   const count = Number(session_count);
   if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) return bad(res, 'session_count must be a whole number of 1 or more');
@@ -829,51 +856,189 @@ app.post('/api/clients/:id/packages', async (req, res) => {
   if (!client) return bad(res, 'Client not found', 404);
 
   const trimmedName = String(name).trim();
+  const svcId = service_id || null;
   const saleRes = await db.execute({
-    sql: 'INSERT INTO package_sales (client_id, package_id, name, session_count, price, payment_state, note) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    args: [req.params.id, package_id || null, trimmedName, count, priceNum, state, note || null],
+    sql: 'INSERT INTO package_sales (client_id, package_id, name, session_count, price, payment_state, note, service_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    args: [req.params.id, package_id || null, trimmedName, count, priceNum, state, note || null, svcId],
   });
+  const saleId = Number(saleRes.lastInsertRowid);
   // Credits are handed over right away regardless of whether the client has
   // paid yet — payment is tracked separately on the package_sales row above,
   // the same way an unpaid session still counts as a session that happened.
+  // Tagged with the sale's service (if any) so a client who buys a bundle of
+  // Muay Thai AND one of Physical Therapy gets two separate credit balances
+  // instead of one undifferentiated count — see redeem-credit below — and
+  // with package_sale_id so editing/deleting this sale later can find
+  // exactly the credits it granted.
   for (let i = 0; i < count; i++) {
     await db.execute({
-      sql: `INSERT INTO session_entries (client_id, payment_state, amount, note, source) VALUES (?, 'prepaid', NULL, ?, 'manual')`,
-      args: [req.params.id, `Package: ${trimmedName}`],
+      sql: `INSERT INTO session_entries (client_id, service_id, payment_state, amount, note, source, package_sale_id) VALUES (?, ?, 'prepaid', NULL, ?, 'manual', ?)`,
+      args: [req.params.id, svcId, `Package: ${trimmedName}`, saleId],
     });
   }
-  ok(res, { id: Number(saleRes.lastInsertRowid), credits_added: count });
+  ok(res, { id: saleId, credits_added: count });
 });
 
-// Flip a package sale from unpaid to paid — the same idea as "Mark paid" on
-// a session entry, just for a batch-of-credits sale instead of a single one.
+// Full edit of a package sale — fixing a mistaken price, name, service, or
+// session count after the fact, not just flipping paid/unpaid. Changing
+// session_count adds or removes the credits it granted (see package_sale_id
+// above): growing it hands out more credits, shrinking it removes that many
+// still-unused ones (oldest-added first) and refuses if the client has
+// already redeemed more credits than the new count would leave — you can't
+// take back a visit that already happened. Changing service_id retags only
+// the still-unredeemed credits from this sale; a credit already redeemed is
+// the record of a real visit and keeps whatever service it was actually used
+// for.
 app.put('/api/package-sales/:id', async (req, res) => {
-  const { payment_state } = req.body || {};
-  if (!['paid_now', 'unpaid'].includes(payment_state)) return bad(res, "payment_state must be 'paid_now' or 'unpaid'");
-  await db.execute({ sql: 'UPDATE package_sales SET payment_state=? WHERE id=?', args: [payment_state, req.params.id] });
+  const saleId = Number(req.params.id);
+  const sale = (await db.execute({ sql: 'SELECT * FROM package_sales WHERE id=?', args: [saleId] })).rows[0];
+  if (!sale) return bad(res, 'Package sale not found', 404);
+
+  const { name, price, note, payment_state, service_id, session_count } = req.body || {};
+  if (payment_state !== undefined && !['paid_now', 'unpaid'].includes(payment_state)) {
+    return bad(res, "payment_state must be 'paid_now' or 'unpaid'");
+  }
+  if (price !== undefined && price !== null) {
+    const priceNum = Number(price);
+    if (!Number.isFinite(priceNum) || priceNum < 0) return bad(res, 'price must be 0 or more');
+  }
+  if (name !== undefined && !String(name).trim()) return bad(res, 'name cannot be blank');
+
+  let newCount = Number(sale.session_count);
+  if (session_count !== undefined && session_count !== null) {
+    newCount = Number(session_count);
+    if (!Number.isFinite(newCount) || newCount <= 0 || !Number.isInteger(newCount)) {
+      return bad(res, 'session_count must be a whole number of 1 or more');
+    }
+    const oldCount = Number(sale.session_count);
+    if (newCount > oldCount) {
+      const svcForNew = service_id !== undefined ? (service_id || null) : sale.service_id;
+      for (let i = 0; i < newCount - oldCount; i++) {
+        await db.execute({
+          sql: `INSERT INTO session_entries (client_id, service_id, payment_state, amount, note, source, package_sale_id) VALUES (?, ?, 'prepaid', NULL, ?, 'manual', ?)`,
+          args: [sale.client_id, svcForNew, `Package: ${name !== undefined ? String(name).trim() : sale.name}`, saleId],
+        });
+      }
+    } else if (newCount < oldCount) {
+      const toRemove = oldCount - newCount;
+      const removable = (
+        await db.execute({
+          sql: `SELECT id FROM session_entries WHERE package_sale_id=? AND payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?`,
+          args: [saleId, toRemove],
+        })
+      ).rows;
+      if (removable.length < toRemove) {
+        const alreadyUsed = oldCount - removable.length;
+        return bad(res, `Can't reduce to ${newCount} — the client has already used ${alreadyUsed} of the ${oldCount} credits from this sale.`);
+      }
+      for (const row of removable) {
+        await db.execute({ sql: 'DELETE FROM session_entries WHERE id=?', args: [row.id] });
+      }
+    }
+  }
+
+  if (service_id !== undefined) {
+    // Retag only this sale's still-unredeemed credits — a redeemed one is a
+    // completed visit and keeps whatever service it actually happened under.
+    await db.execute({
+      sql: `UPDATE session_entries SET service_id=? WHERE package_sale_id=? AND redeemed_at IS NULL`,
+      args: [service_id || null, saleId],
+    });
+  }
+
+  await db.execute({
+    sql: `UPDATE package_sales SET
+            name = COALESCE(?, name),
+            price = COALESCE(?, price),
+            note = COALESCE(?, note),
+            payment_state = COALESCE(?, payment_state),
+            service_id = CASE WHEN ? THEN ? ELSE service_id END,
+            session_count = ?
+          WHERE id=?`,
+    args: [
+      name !== undefined ? String(name).trim() : null,
+      price !== undefined && price !== null ? Number(price) : null,
+      note !== undefined ? note : null,
+      payment_state ?? null,
+      service_id !== undefined ? 1 : 0,
+      service_id || null,
+      newCount,
+      saleId,
+    ],
+  });
   ok(res, { ok: true });
 });
 
-// Redeems the client's oldest available prepaid credit for an actual visit:
+// Deleting a whole package sale removes only the credits it granted that are
+// still unused (payment_state='prepaid', unredeemed) — one already redeemed
+// is now the record of a real visit and is left alone, just no longer linked
+// to a sale that no longer exists (package_sale_id cleared rather than left
+// pointing at a deleted row, which the FK constraint on that column would
+// otherwise refuse outright). Use this for "I sold the wrong bundle
+// entirely" — PUT above for correcting a detail on an otherwise-right sale.
+app.delete('/api/package-sales/:id', async (req, res) => {
+  const saleId = Number(req.params.id);
+  const sale = (await db.execute({ sql: 'SELECT * FROM package_sales WHERE id=?', args: [saleId] })).rows[0];
+  if (!sale) return bad(res, 'Package sale not found', 404);
+  await db.execute({
+    sql: `DELETE FROM session_entries WHERE package_sale_id=? AND payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL`,
+    args: [saleId],
+  });
+  await db.execute({ sql: `UPDATE session_entries SET package_sale_id=NULL WHERE package_sale_id=?`, args: [saleId] });
+  await db.execute({ sql: 'DELETE FROM package_sales WHERE id=?', args: [saleId] });
+  ok(res, { ok: true });
+});
+
+// Redeems one of the client's available prepaid credits for an actual visit:
 // turns a still-unused credit row (payment_state='prepaid', amount NULL,
 // redeemed_at NULL) into the record of that visit by stamping it with today's
 // date, the service given, and redeemed_at — so it stops counting toward
-// "credits left" without losing the fact that a credit was used. Picks the
-// oldest one (FIFO) rather than requiring the caller to pick a specific
-// package sale, since credits from different packages are fungible here.
+// "credits left" without losing the fact that a credit was used.
+//
+// Bundles are per-service (see schema.sql / POST .../packages), so a client
+// with 3 Muay Thai credits and 5 Physical Therapy credits must have a Muay
+// Thai visit consume a Muay Thai credit, never a PT one. When a service is
+// given, this picks the oldest unredeemed credit tagged for that exact
+// service; only if there is none does it fall back to the oldest untagged
+// "general" credit (service_id NULL — older sales, or a bundle sold without
+// picking a service). With no service given at all, it just takes the oldest
+// credit overall, as before.
 app.post('/api/clients/:id/redeem-credit', async (req, res) => {
   const { service_id, note } = req.body || {};
   const client = (await db.execute({ sql: 'SELECT id FROM clients WHERE id=?', args: [req.params.id] })).rows[0];
   if (!client) return bad(res, 'Client not found', 404);
-  const credit = (
-    await db.execute({
-      sql: `SELECT id FROM session_entries
-            WHERE client_id=? AND payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL
-            ORDER BY created_at ASC LIMIT 1`,
-      args: [req.params.id],
-    })
-  ).rows[0];
-  if (!credit) return bad(res, 'No prepaid credits available for this client');
+
+  let credit;
+  if (service_id) {
+    credit = (
+      await db.execute({
+        sql: `SELECT id FROM session_entries
+              WHERE client_id=? AND payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL AND service_id=?
+              ORDER BY created_at ASC LIMIT 1`,
+        args: [req.params.id, service_id],
+      })
+    ).rows[0];
+    if (!credit) {
+      credit = (
+        await db.execute({
+          sql: `SELECT id FROM session_entries
+                WHERE client_id=? AND payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL AND service_id IS NULL
+                ORDER BY created_at ASC LIMIT 1`,
+          args: [req.params.id],
+        })
+      ).rows[0];
+    }
+  } else {
+    credit = (
+      await db.execute({
+        sql: `SELECT id FROM session_entries
+              WHERE client_id=? AND payment_state='prepaid' AND amount IS NULL AND redeemed_at IS NULL
+              ORDER BY created_at ASC LIMIT 1`,
+        args: [req.params.id],
+      })
+    ).rows[0];
+  }
+  if (!credit) return bad(res, 'No prepaid credits available for this client and service');
   const receiptNumber = await nextReceiptNumber();
   await db.execute({
     sql: `UPDATE session_entries SET
@@ -886,6 +1051,105 @@ app.post('/api/clients/:id/redeem-credit', async (req, res) => {
     args: [service_id || null, note || null, receiptNumber, credit.id],
   });
   ok(res, { id: credit.id, receipt_number: receiptNumber });
+});
+
+// Applies money received against what a client actually owes, instead of
+// just logging a disconnected new "paid" entry alongside their still-open
+// unpaid one — which is how "I asked for $100, they paid $100, and it still
+// shows they owe me" used to happen: the old "Record payment → Paid" always
+// created a brand-new session_entries row and never touched the existing
+// unpaid one, so the debt just sat there next to a payment that, on paper,
+// had nothing to do with it.
+//
+// This instead walks the client's unpaid sessions and unpaid package sales
+// (optionally narrowed to one service), oldest first, and pays them down:
+//   - a debt the payment fully covers gets marked paid_now, in full;
+//   - a debt bigger than what's left of the payment gets partially reduced
+//     (its amount/price drops by what was applied, it stays 'unpaid' for the
+//     rest, and a note records the partial payment) — so paying $60 against
+//     a $100 balance correctly leaves $40 owed, not $100 or $0;
+//   - anything left over once every matching debt is fully paid (including
+//     when there was no debt at all) is logged as a fresh paid_now session,
+//     same as a plain new payment always has been.
+// This also means a totally new "just paid, nothing was owed" payment still
+// works exactly as before — it falls straight through to that last step.
+app.post('/api/clients/:id/settle-balance', async (req, res) => {
+  const { amount, service_id, note } = req.body || {};
+  const amt = normalizeSessionAmount(amount);
+  if (!amt.ok || !amt.value || amt.value <= 0) return bad(res, 'amount must be a whole number greater than 0');
+  let remaining = amt.value;
+
+  const client = (await db.execute({ sql: 'SELECT id FROM clients WHERE id=?', args: [req.params.id] })).rows[0];
+  if (!client) return bad(res, 'Client not found', 404);
+
+  const unpaidSessions = (
+    await db.execute({
+      sql: `SELECT id, amount, COALESCE(session_date, created_at) as when_ FROM session_entries
+            WHERE client_id=? AND payment_state='unpaid' AND amount IS NOT NULL
+              AND (? IS NULL OR service_id = ?)
+            ORDER BY when_ ASC, id ASC`,
+      args: [req.params.id, service_id || null, service_id || null],
+    })
+  ).rows;
+  const unpaidPackages = (
+    await db.execute({
+      sql: `SELECT id, price as amount, sold_at as when_ FROM package_sales
+            WHERE client_id=? AND payment_state='unpaid'
+              AND (? IS NULL OR service_id = ?)
+            ORDER BY when_ ASC, id ASC`,
+      args: [req.params.id, service_id || null, service_id || null],
+    })
+  ).rows;
+
+  const debts = [
+    ...unpaidSessions.map((r) => ({ type: 'session', id: Number(r.id), amount: Number(r.amount), when: r.when_ })),
+    ...unpaidPackages.map((r) => ({ type: 'package', id: Number(r.id), amount: Number(r.amount), when: r.when_ })),
+  ].sort((a, b) => (a.when < b.when ? -1 : a.when > b.when ? 1 : 0));
+
+  const today = new Date().toISOString().slice(0, 10);
+  const settled = [];
+  for (const debt of debts) {
+    if (remaining <= 0) break;
+    if (remaining >= debt.amount) {
+      if (debt.type === 'session') {
+        await db.execute({ sql: `UPDATE session_entries SET payment_state='paid_now' WHERE id=?`, args: [debt.id] });
+      } else {
+        await db.execute({ sql: `UPDATE package_sales SET payment_state='paid_now' WHERE id=?`, args: [debt.id] });
+      }
+      remaining -= debt.amount;
+      settled.push({ type: debt.type, id: debt.id, applied: debt.amount, fully_paid: true });
+    } else {
+      const applied = remaining;
+      const left = debt.amount - applied;
+      const partialNote = `Partial payment of $${applied} received ${today}, $${left} still owed.`;
+      if (debt.type === 'session') {
+        await db.execute({
+          sql: `UPDATE session_entries SET amount=?, note = CASE WHEN note IS NULL OR note='' THEN ? ELSE note || ' — ' || ? END WHERE id=?`,
+          args: [left, partialNote, partialNote, debt.id],
+        });
+      } else {
+        await db.execute({
+          sql: `UPDATE package_sales SET price=?, note = CASE WHEN note IS NULL OR note='' THEN ? ELSE note || ' — ' || ? END WHERE id=?`,
+          args: [left, partialNote, partialNote, debt.id],
+        });
+      }
+      remaining = 0;
+      settled.push({ type: debt.type, id: debt.id, applied, fully_paid: false, remaining_owed: left });
+    }
+  }
+
+  let newSessionId = null;
+  if (remaining > 0) {
+    const receiptNumber = await nextReceiptNumber();
+    const r = await db.execute({
+      sql: `INSERT INTO session_entries (client_id, service_id, payment_state, amount, note, source, receipt_number)
+            VALUES (?, ?, 'paid_now', ?, ?, 'manual', ?)`,
+      args: [req.params.id, service_id || null, remaining, note || null, receiptNumber],
+    });
+    newSessionId = Number(r.lastInsertRowid);
+  }
+
+  ok(res, { settled, overpayment_logged: remaining > 0 ? remaining : 0, new_session_id: newSessionId });
 });
 
 // ---------- Checkins ----------
@@ -1158,6 +1422,83 @@ async function moneyByPeriod() {
 
 // ---------- Reports ----------
 
+// Powers the Overview "Unpaid balance" card as a drill-down: tap it to see
+// exactly who owes money and, for each of them, which service it's for —
+// rather than just one lump total with no way to see who paid and who
+// didn't. Not owner-gated: staff can already see each client's own unpaid
+// amount on the Clients list and on their page, so a page that just totals
+// those same numbers up per client reveals nothing new to them.
+app.get('/api/reports/unpaid', async (req, res) => {
+  const sessionRows = (
+    await db.execute(`
+      SELECT se.client_id, c.name as client_name, c.phone as client_phone,
+             se.service_id, sv.name as service_name,
+             se.id, se.amount, COALESCE(se.session_date, se.created_at) as when_, se.note
+      FROM session_entries se
+      JOIN clients c ON c.id = se.client_id
+      LEFT JOIN services sv ON sv.id = se.service_id
+      WHERE se.payment_state='unpaid'
+      ORDER BY when_ ASC
+    `)
+  ).rows;
+  const packageRows = (
+    await db.execute(`
+      SELECT ps.client_id, c.name as client_name, c.phone as client_phone,
+             ps.service_id, sv.name as service_name,
+             ps.id, ps.price as amount, ps.sold_at as when_, ps.name as item_name
+      FROM package_sales ps
+      JOIN clients c ON c.id = ps.client_id
+      LEFT JOIN services sv ON sv.id = ps.service_id
+      WHERE ps.payment_state='unpaid'
+      ORDER BY when_ ASC
+    `)
+  ).rows;
+
+  const byClient = new Map();
+  const getClient = (row) => {
+    const cid = Number(row.client_id);
+    if (!byClient.has(cid)) {
+      byClient.set(cid, { client_id: cid, client_name: row.client_name, client_phone: row.client_phone, total: 0, unknown_amount_sessions: 0, by_service: new Map() });
+    }
+    return byClient.get(cid);
+  };
+  const getServiceBucket = (client, row) => {
+    const sid = row.service_id === null ? 'general' : Number(row.service_id);
+    if (!client.by_service.has(sid)) {
+      client.by_service.set(sid, { service_id: sid === 'general' ? null : sid, service_name: row.service_name || 'General / unspecified', amount: 0, items: [] });
+    }
+    return client.by_service.get(sid);
+  };
+
+  for (const row of sessionRows) {
+    const client = getClient(row);
+    if (row.amount === null || row.amount === undefined) {
+      client.unknown_amount_sessions += 1;
+      continue;
+    }
+    const bucket = getServiceBucket(client, row);
+    const amt = Number(row.amount);
+    bucket.amount += amt;
+    client.total += amt;
+    bucket.items.push({ type: 'session', id: Number(row.id), amount: amt, when: row.when_, note: row.note });
+  }
+  for (const row of packageRows) {
+    const client = getClient(row);
+    const bucket = getServiceBucket(client, row);
+    const amt = Number(row.amount);
+    bucket.amount += amt;
+    client.total += amt;
+    bucket.items.push({ type: 'package', id: Number(row.id), amount: amt, when: row.when_, note: row.item_name });
+  }
+
+  const clients = [...byClient.values()]
+    .map((c) => ({ ...c, by_service: [...c.by_service.values()].sort((a, b) => b.amount - a.amount) }))
+    .filter((c) => c.total > 0 || c.unknown_amount_sessions > 0)
+    .sort((a, b) => b.total - a.total);
+
+  ok(res, { total: clients.reduce((s, c) => s + c.total, 0), clients });
+});
+
 app.get('/api/reports/revenue', requireOwner, async (req, res) => {
   const byService = (
     await db.execute(`
@@ -1195,8 +1536,11 @@ app.get('/api/reports/revenue', requireOwner, async (req, res) => {
 // filesystem, hosting free tier, even Turso) is a "should be fine" — this is
 // a "definitely fine" that lives wherever Anthony puts the downloaded file.
 
-const BACKUP_TABLES = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_packages', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items', 'package_sales'];
-const BACKUP_INSERT_ORDER = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_packages', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items', 'package_sales'];
+const BACKUP_TABLES = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_packages', 'package_sales', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
+// package_sales must be inserted before session_entries — a credit row's
+// package_sale_id foreign key needs the sale it came from to already exist,
+// same reasoning as sale_items needing sales/products first.
+const BACKUP_INSERT_ORDER = ['clients', 'client_photos', 'client_metrics', 'message_templates', 'services', 'session_packages', 'package_sales', 'session_entries', 'appointments', 'products', 'sales', 'sale_items', 'purchases', 'purchase_items'];
 const BACKUP_DELETE_ORDER = [...BACKUP_INSERT_ORDER].reverse(); // children before parents
 
 app.get('/api/backup/export', requireOwner, async (req, res) => {
